@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::os::unix::io::RawFd;
+use std::io::{BufRead, BufReader};
+use std::os::unix::io::{FromRawFd, RawFd};
+use std::os::unix::net::UnixDatagram;
 use std::path::Path;
 
 use nix::sys::signal::Signal;
@@ -8,11 +10,17 @@ use nix::unistd::{self, ForkResult, Pid};
 
 use crate::config::service::ServiceDef;
 
+/// Path to the log socket (must match dynamod-logd).
+const LOG_SOCKET_PATH: &str = "/run/dynamod/log.sock";
+
 /// Information about a successfully spawned service process.
 #[derive(Debug)]
 pub struct SpawnedProcess {
     pub pid: Pid,
     pub pidfd: Option<RawFd>,
+    /// Read end of the readiness fd pipe (for ReadinessType::Fd).
+    /// The write end was passed to the child as DYNAMOD_READY_FD.
+    pub ready_fd: Option<RawFd>,
 }
 
 /// Errors that can occur during process spawning.
@@ -70,10 +78,26 @@ pub fn spawn_service(def: &ServiceDef) -> Result<SpawnedProcess, SpawnError> {
         env_map.insert(k.clone(), v.clone());
     }
 
+    // Create ready-fd pipe for ReadinessType::Fd services
+    use crate::config::service::ReadinessType;
+    let ready_pipe = if def.readiness.readiness_type == ReadinessType::Fd {
+        create_pipe()
+    } else {
+        None
+    };
+
+    // Pass the write end fd to the child via DYNAMOD_READY_FD
+    if let Some((_, write_end)) = ready_pipe {
+        env_map.insert("DYNAMOD_READY_FD".to_string(), write_end.to_string());
+    }
+
     let env: Vec<CString> = env_map
         .iter()
         .filter_map(|(k, v)| CString::new(format!("{k}={v}")).ok())
         .collect();
+
+    // Create a pipe for capturing stdout/stderr
+    let log_pipe = create_pipe();
 
     // Fork
     let fork_result = unsafe { unistd::fork() }.map_err(SpawnError::Fork)?;
@@ -81,6 +105,32 @@ pub fn spawn_service(def: &ServiceDef) -> Result<SpawnedProcess, SpawnError> {
     match fork_result {
         ForkResult::Child => {
             // === Child process ===
+
+            // Redirect stdout/stderr to the log pipe
+            if let Some((_, write_end)) = log_pipe {
+                unsafe {
+                    libc::dup2(write_end, 1); // stdout
+                    libc::dup2(write_end, 2); // stderr
+                    if write_end > 2 {
+                        libc::close(write_end);
+                    }
+                }
+            }
+            // Close read end in child
+            if let Some((read_end, _)) = log_pipe {
+                unsafe { libc::close(read_end); }
+            }
+
+            // Clear CLOEXEC on the ready-fd write end so it survives exec
+            if let Some((read_end, write_end)) = ready_pipe {
+                unsafe {
+                    libc::close(read_end);
+                    let flags = libc::fcntl(write_end, libc::F_GETFD);
+                    if flags >= 0 {
+                        libc::fcntl(write_end, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                    }
+                }
+            }
 
             // Apply namespace isolation (must happen before other setup)
             if let Some(ref ns_config) = def.namespace {
@@ -113,12 +163,37 @@ pub fn spawn_service(def: &ServiceDef) -> Result<SpawnedProcess, SpawnError> {
                 child
             );
 
+            // Close write end in parent, start log relay thread for read end
+            if let Some((read_end, write_end)) = log_pipe {
+                unsafe { libc::close(write_end); }
+                let service_name = def.service.name.clone();
+                std::thread::spawn(move || {
+                    relay_logs(read_end, &service_name);
+                });
+            }
+
+            // Handle ready-fd pipe: close write end, set read end non-blocking
+            let ready_fd_read = if let Some((read_end, write_end)) = ready_pipe {
+                unsafe {
+                    libc::close(write_end);
+                    // Set non-blocking so readiness polling doesn't block
+                    let flags = libc::fcntl(read_end, libc::F_GETFL);
+                    if flags >= 0 {
+                        libc::fcntl(read_end, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                    }
+                }
+                Some(read_end)
+            } else {
+                None
+            };
+
             // Open pidfd for the child
             let pidfd = open_pidfd(child);
 
             Ok(SpawnedProcess {
                 pid: child,
                 pidfd,
+                ready_fd: ready_fd_read,
             })
         }
     }
@@ -136,30 +211,119 @@ fn open_pidfd(pid: Pid) -> Option<RawFd> {
 }
 
 /// Drop privileges to the specified user/group.
-fn drop_privileges(user: &crate::config::service::UserSection) {
-    use nix::unistd::{setgid, setuid, Gid, Uid};
+/// Order: resolve all IDs → setgroups → setgid → setuid (setuid must be last).
+fn drop_privileges(user_section: &crate::config::service::UserSection) {
+    use nix::unistd::{setgid, setgroups, setuid, Gid, Group, Uid, User};
 
-    // Set supplementary groups first (must be done before setuid)
-    if !user.supplementary_groups.is_empty() {
-        // Would need to resolve group names to GIDs
-        // For now, just log a warning
-        tracing::warn!("supplementary groups not yet implemented");
+    // Resolve the target user (needed for default GID fallback)
+    let resolved_user = user_section.user.as_ref().and_then(|name| {
+        if let Ok(uid) = name.parse::<u32>() {
+            Some((Uid::from_raw(uid), None))
+        } else {
+            match User::from_name(name) {
+                Ok(Some(u)) => Some((u.uid, Some(u.gid))),
+                Ok(None) => {
+                    eprintln!("dynamod: unknown user: {name}");
+                    None
+                }
+                Err(e) => {
+                    eprintln!("dynamod: user lookup failed for '{name}': {e}");
+                    None
+                }
+            }
+        }
+    });
+
+    // Resolve supplementary groups
+    let mut supp_gids: Vec<Gid> = Vec::new();
+    for group_name in &user_section.supplementary_groups {
+        if let Ok(gid) = group_name.parse::<u32>() {
+            supp_gids.push(Gid::from_raw(gid));
+        } else {
+            match Group::from_name(group_name) {
+                Ok(Some(grp)) => supp_gids.push(grp.gid),
+                Ok(None) => eprintln!("dynamod: unknown supplementary group: {group_name}"),
+                Err(e) => eprintln!("dynamod: group lookup failed for '{group_name}': {e}"),
+            }
+        }
     }
 
-    // Set group
-    if let Some(ref group) = user.group {
+    // Set supplementary groups (must happen before setuid)
+    if !supp_gids.is_empty() {
+        if let Err(e) = setgroups(&supp_gids) {
+            eprintln!("dynamod: setgroups failed: {e}");
+        }
+    }
+
+    // Set primary group
+    let target_gid = if let Some(ref group) = user_section.group {
         if let Ok(gid) = group.parse::<u32>() {
-            let _ = setgid(Gid::from_raw(gid));
+            Some(Gid::from_raw(gid))
+        } else {
+            match Group::from_name(group) {
+                Ok(Some(grp)) => Some(grp.gid),
+                Ok(None) => {
+                    eprintln!("dynamod: unknown group: {group}");
+                    None
+                }
+                Err(e) => {
+                    eprintln!("dynamod: group lookup failed for '{group}': {e}");
+                    None
+                }
+            }
         }
-        // TODO: resolve group name to GID via getgrnam
+    } else {
+        // Fall back to the user's primary group if no explicit group
+        resolved_user.as_ref().and_then(|(_, gid)| *gid)
+    };
+
+    if let Some(gid) = target_gid {
+        if let Err(e) = setgid(gid) {
+            eprintln!("dynamod: setgid({gid}) failed: {e}");
+        }
     }
 
-    // Set user (must be last)
-    if let Some(ref user_name) = user.user {
-        if let Ok(uid) = user_name.parse::<u32>() {
-            let _ = setuid(Uid::from_raw(uid));
+    // Set user (must be last — drops ability to change back)
+    if let Some((uid, _)) = resolved_user {
+        if let Err(e) = setuid(uid) {
+            eprintln!("dynamod: setuid({uid}) failed: {e}");
         }
-        // TODO: resolve username to UID via getpwnam
+    }
+}
+
+/// Create a pipe, returning (read_fd, write_fd) as raw file descriptors.
+fn create_pipe() -> Option<(RawFd, RawFd)> {
+    let mut fds = [0 as RawFd; 2];
+    let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if ret == 0 {
+        Some((fds[0], fds[1]))
+    } else {
+        None
+    }
+}
+
+/// Relay log lines from a pipe fd to the dynamod-logd socket.
+/// Each line is sent as a datagram: "<service_name>\t<line>".
+/// Runs until the pipe is closed (service exits).
+fn relay_logs(read_fd: RawFd, service_name: &str) {
+    let file = unsafe { std::fs::File::from_raw_fd(read_fd) };
+    let reader = BufReader::new(file);
+    let sock = UnixDatagram::unbound().ok();
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        if line.is_empty() {
+            continue;
+        }
+
+        // Send to logd socket if available
+        if let Some(ref sock) = sock {
+            let msg = format!("{service_name}\t{line}");
+            let _ = sock.send_to(msg.as_bytes(), LOG_SOCKET_PATH);
+        }
     }
 }
 

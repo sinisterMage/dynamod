@@ -125,6 +125,17 @@ pub fn tree(socket_path: &str) -> Result {
     }
 }
 
+pub fn reload(socket_path: &str) -> Result {
+    match send_request(socket_path, MessageBody::Reload)? {
+        MessageBody::Ack => {
+            println!("Reloading service definitions...");
+            Ok(())
+        }
+        MessageBody::Error { message } => Err(message.into()),
+        _ => Err("unexpected response".into()),
+    }
+}
+
 pub fn shutdown(socket_path: &str, kind: &str) -> Result {
     let shutdown_kind = match kind {
         "poweroff" | "off" => ShutdownKind::Poweroff,

@@ -7,6 +7,7 @@
 /// - **exec**: Run a health-check command; ready when it exits 0
 /// - **fd**: Service writes a byte to a passed file descriptor
 use std::net::TcpStream;
+use std::os::unix::io::RawFd;
 use std::os::unix::net::UnixDatagram;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -35,6 +36,10 @@ pub struct ReadinessTracker {
     timeout: Duration,
     started_at: Instant,
     notify_socket: Option<PathBuf>,
+    /// Bound notify socket (created once, polled on each check)
+    bound_notify: Option<UnixDatagram>,
+    /// Read end of the fd-based readiness pipe (parent polls this).
+    ready_fd: Option<RawFd>,
 }
 
 impl ReadinessTracker {
@@ -53,6 +58,21 @@ impl ReadinessTracker {
             None
         };
 
+        // Bind the notify socket once at construction
+        let bound_notify = notify_socket.as_ref().and_then(|path| {
+            let _ = std::fs::remove_file(path);
+            match UnixDatagram::bind(path) {
+                Ok(sock) => {
+                    sock.set_nonblocking(true).ok();
+                    Some(sock)
+                }
+                Err(e) => {
+                    tracing::warn!("failed to bind notify socket {}: {e}", path.display());
+                    None
+                }
+            }
+        });
+
         Self {
             readiness_type: config.readiness_type.clone(),
             port: config.port,
@@ -60,12 +80,19 @@ impl ReadinessTracker {
             timeout,
             started_at: Instant::now(),
             notify_socket,
+            bound_notify,
+            ready_fd: None,
         }
     }
 
     /// Get the NOTIFY_SOCKET path (for sd_notify compatible services).
     pub fn notify_socket_path(&self) -> Option<&PathBuf> {
         self.notify_socket.as_ref()
+    }
+
+    /// Set the read end of the fd-based readiness pipe.
+    pub fn set_ready_fd(&mut self, fd: RawFd) {
+        self.ready_fd = Some(fd);
     }
 
     /// Check if this service is immediately ready (type = none).
@@ -84,7 +111,7 @@ impl ReadinessTracker {
             ReadinessType::TcpPort => self.check_tcp_port(),
             ReadinessType::Exec => self.check_exec(),
             ReadinessType::Notify => self.check_notify(),
-            ReadinessType::Fd => ReadinessResult::NotReady, // fd-based handled externally
+            ReadinessType::Fd => self.check_fd(),
         }
     }
 
@@ -126,35 +153,59 @@ impl ReadinessTracker {
 
     /// Check for sd_notify readiness (READY=1 on the notify socket).
     fn check_notify(&self) -> ReadinessResult {
-        let path = match &self.notify_socket {
-            Some(p) => p,
+        let sock = match &self.bound_notify {
+            Some(s) => s,
             None => return ReadinessResult::Failed("no notify socket".into()),
-        };
-
-        // Try to receive a datagram (non-blocking)
-        let sock = match UnixDatagram::bind(path) {
-            Ok(s) => {
-                s.set_nonblocking(true).ok();
-                s
-            }
-            Err(_) => return ReadinessResult::NotReady,
         };
 
         let mut buf = [0u8; 256];
         match sock.recv(&mut buf) {
             Ok(n) => {
                 let msg = std::str::from_utf8(&buf[..n]).unwrap_or("");
-                // Clean up socket
-                let _ = std::fs::remove_file(path);
                 if msg.contains("READY=1") {
+                    // Clean up socket file
+                    if let Some(ref path) = self.notify_socket {
+                        let _ = std::fs::remove_file(path);
+                    }
                     ReadinessResult::Ready
                 } else {
                     ReadinessResult::NotReady
                 }
             }
-            Err(_) => {
-                let _ = std::fs::remove_file(path);
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 ReadinessResult::NotReady
+            }
+            Err(_) => ReadinessResult::NotReady,
+        }
+    }
+
+    /// Check for fd-based readiness (service writes a byte to the pipe).
+    fn check_fd(&self) -> ReadinessResult {
+        let fd = match self.ready_fd {
+            Some(fd) => fd,
+            None => return ReadinessResult::Failed("no ready fd configured".into()),
+        };
+
+        // Non-blocking read: check if any byte has arrived
+        let mut buf = [0u8; 1];
+        let result = unsafe {
+            libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, 1)
+        };
+
+        if result > 0 {
+            // Close the read end now that we've received the signal
+            unsafe { libc::close(fd); }
+            ReadinessResult::Ready
+        } else if result == 0 {
+            // Pipe closed without writing — service exited without signaling
+            unsafe { libc::close(fd); }
+            ReadinessResult::Failed("ready fd closed without signal".into())
+        } else {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::WouldBlock {
+                ReadinessResult::NotReady
+            } else {
+                ReadinessResult::Failed(format!("ready fd read error: {err}"))
             }
         }
     }

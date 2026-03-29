@@ -1,7 +1,7 @@
 [service]
-name = "network"
+name = "sysctl"
 supervisor = "early-boot"
-exec = ["/sbin/ip", "link", "set", "lo", "up"]
+exec = ["/sbin/sysctl", "-p"]
 type = "oneshot"
 
 [restart]
@@ -15,4 +15,4 @@ type = "none"
 
 [shutdown]
 stop-signal = "SIGTERM"
-stop-timeout = "5s"
+stop-timeout = "3s"

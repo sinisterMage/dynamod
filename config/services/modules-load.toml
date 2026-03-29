@@ -1,0 +1,18 @@
+[service]
+name = "modules-load"
+supervisor = "early-boot"
+exec = ["/bin/sh", "-c", "cat /etc/modules 2>/dev/null | while read mod args; do [ -n \"$mod\" ] && modprobe $mod $args; done; true"]
+type = "oneshot"
+
+[restart]
+policy = "temporary"
+
+[dependencies]
+requires = ["fstab-mount"]
+
+[readiness]
+type = "none"
+
+[shutdown]
+stop-signal = "SIGTERM"
+stop-timeout = "10s"

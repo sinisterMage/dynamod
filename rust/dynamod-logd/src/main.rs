@@ -1,15 +1,13 @@
 /// dynamod-logd: Log collection daemon for the dynamod init system.
 ///
-/// Accepts log streams from services via inherited pipe fds or
-/// a Unix socket. Stores logs in a ring buffer and provides
-/// a query interface.
-///
-/// Phase 6: Basic implementation that reads from stdin (pipe from svmgr)
-/// and writes to a log file.
+/// Accepts log streams from services via a Unix datagram socket
+/// at /run/dynamod/log.sock. Also reads from stdin for backward
+/// compatibility.
 mod collector;
 mod storage;
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 fn main() {
     tracing_subscriber::fmt()
@@ -25,12 +23,25 @@ fn main() {
         tracing::warn!("failed to create {}: {e}", log_dir.display());
     }
 
-    let mut store = storage::LogStorage::new(log_dir, 10 * 1024 * 1024); // 10 MiB max
+    let store = Arc::new(Mutex::new(
+        storage::LogStorage::new(log_dir, 10 * 1024 * 1024), // 10 MiB max
+    ));
 
-    // Collect from stdin (piped from svmgr)
-    tracing::info!("collecting logs from stdin");
-    if let Err(e) = collector::collect_stdin(&mut store) {
-        tracing::error!("log collection stopped: {e}");
+    // Start socket collector in a background thread
+    let store_socket = Arc::clone(&store);
+    std::thread::spawn(move || {
+        if let Err(e) = collector::collect_socket(store_socket) {
+            tracing::error!("socket collector stopped: {e}");
+        }
+    });
+
+    // Collect from stdin on main thread (piped from svmgr or service)
+    tracing::info!("collecting logs from stdin and socket");
+    {
+        let mut store_guard = store.lock().unwrap();
+        if let Err(e) = collector::collect_stdin(&mut store_guard) {
+            tracing::error!("stdin collection stopped: {e}");
+        }
     }
 
     tracing::info!("dynamod-logd exiting");

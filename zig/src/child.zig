@@ -64,7 +64,7 @@ pub fn spawn(self: *Self, klog: ?kmsg) !void {
         var fd_buf: [16]u8 = undefined;
         const fd_str = std.fmt.bufPrintZ(&fd_buf, "{d}", .{svmgr_fd}) catch "3";
 
-        // Build environment string for execve
+        // Build environment for execve
         var env_buf: [128]u8 = undefined;
         const env_str = std.fmt.bufPrintZ(&env_buf, "{s}={s}", .{ constants.init_fd_env, fd_str }) catch unreachable;
 
@@ -74,6 +74,9 @@ pub fn spawn(self: *Self, klog: ?kmsg) !void {
         };
         const env = [_:null]?[*:0]const u8{
             env_str,
+            "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+            "HOME=/",
+            "TERM=linux",
             null,
         };
 

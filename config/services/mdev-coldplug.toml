@@ -1,14 +1,14 @@
 [service]
-name = "network"
+name = "mdev-coldplug"
 supervisor = "early-boot"
-exec = ["/sbin/ip", "link", "set", "lo", "up"]
+exec = ["/sbin/mdev", "-s"]
 type = "oneshot"
 
 [restart]
 policy = "temporary"
 
 [dependencies]
-after = ["fstab-mount"]
+requires = ["modules-load"]
 
 [readiness]
 type = "none"

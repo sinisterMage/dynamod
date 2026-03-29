@@ -57,13 +57,13 @@ fn stop_service_graceful(
     cgroup_hierarchy: &Option<cgroup::hierarchy::CgroupHierarchy>,
     cgroup_monitor: &mut cgroup::monitor::CgroupMonitor,
 ) {
-    let (pid, stop_signal, stop_timeout) = match tree.get_worker(name) {
+    let (pid, stop_signal, stop_timeout, stop_exec) = match tree.get_worker(name) {
         Some(w) if w.pid.is_some() => {
             let sig = parse_signal(&w.def.shutdown.stop_signal);
             let timeout = parse_duration_secs(&w.def.shutdown.stop_timeout)
                 .map(Duration::from_secs)
                 .unwrap_or(Duration::from_secs(10));
-            (w.pid.unwrap(), sig, timeout)
+            (w.pid.unwrap(), sig, timeout, w.def.shutdown.stop_exec.clone())
         }
         _ => return, // Not running or not found
     };
@@ -72,6 +72,34 @@ fn stop_service_graceful(
         "stopping '{name}' (pid {pid}, signal={stop_signal}, timeout={}s)",
         stop_timeout.as_secs()
     );
+
+    // Run stop-exec command if configured (e.g. "nginx -s quit", "pg_ctl stop")
+    if let Some(ref cmd) = stop_exec {
+        if !cmd.is_empty() {
+            tracing::info!("running stop-exec for '{name}': {:?}", cmd);
+            match std::process::Command::new(&cmd[0])
+                .args(&cmd[1..])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+            {
+                Ok(status) if status.success() => {
+                    tracing::info!("stop-exec for '{name}' succeeded");
+                }
+                Ok(status) => {
+                    tracing::warn!(
+                        "stop-exec for '{name}' exited with {}, falling back to signal",
+                        status
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "stop-exec for '{name}' failed: {e}, falling back to signal"
+                    );
+                }
+            }
+        }
+    }
 
     // Send the stop signal
     let nix_pid = Pid::from_raw(pid);

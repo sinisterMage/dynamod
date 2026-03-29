@@ -1,7 +1,7 @@
-.PHONY: all zig rust clean install test test-zig test-rust test-qemu fmt
+.PHONY: all zig rust clean install install-alpine test test-zig test-rust test-qemu test-alpine fmt
 
 DESTDIR ?=
-PREFIX  ?= /usr/local
+PREFIX  ?= /usr
 
 ZIG_OUT   := zig/zig-out/bin
 CARGO_OUT := $(shell if [ -d rust/target/x86_64-unknown-linux-musl/release ]; then echo rust/target/x86_64-unknown-linux-musl/release; else echo rust/target/release; fi)
@@ -27,6 +27,12 @@ install: all
 	install -dm755 $(DESTDIR)/etc/dynamod/supervisors
 	install -Dm644 config/supervisors/root.toml  $(DESTDIR)/etc/dynamod/supervisors/root.toml
 
+install-alpine: install
+	install -Dm644 config/supervisors/early-boot.toml $(DESTDIR)/etc/dynamod/supervisors/early-boot.toml
+	for f in config/services/*.toml; do \
+		install -Dm644 "$$f" "$(DESTDIR)/etc/dynamod/services/$$(basename $$f)"; \
+	done
+
 test: test-zig test-rust
 
 test-zig:
@@ -37,6 +43,9 @@ test-rust:
 
 test-qemu: all
 	test/qemu/run-vm.sh
+
+test-alpine: all
+	test/alpine/build-test.sh
 
 fmt:
 	cd rust && cargo fmt --all

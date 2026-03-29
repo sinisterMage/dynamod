@@ -72,6 +72,7 @@ pub enum ControlAction {
     StartService(String),
     StopService(String),
     RestartService(String),
+    Reload,
     Shutdown(dynamod_common::protocol::ShutdownKind),
 }
 
@@ -191,6 +192,9 @@ fn handle_request(
         }
         MessageBody::Shutdown { kind } => {
             (MessageBody::Ack, Some(ControlAction::Shutdown(kind)))
+        }
+        MessageBody::Reload => {
+            (MessageBody::Ack, Some(ControlAction::Reload))
         }
         _ => (
             MessageBody::Error {

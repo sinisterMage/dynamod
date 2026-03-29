@@ -1,22 +1,18 @@
 [service]
-name = "syslog"
-exec = ["/sbin/syslogd", "-n", "-O", "/var/log/messages"]
+name = "dynamod-logd"
+supervisor = "early-boot"
+exec = ["/usr/lib/dynamod/dynamod-logd"]
 type = "simple"
 
 [restart]
 policy = "permanent"
 delay = "1s"
 
-[readiness]
-type = "none"
-timeout = "10s"
-
 [dependencies]
 after = ["bootmisc"]
 
-[cgroup]
-memory-max = "128M"
-pids-max = 16
+[readiness]
+type = "none"
 
 [shutdown]
 stop-signal = "SIGTERM"

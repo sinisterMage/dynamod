@@ -13,7 +13,7 @@ mod supervisor;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use config::service::{self, parse_duration_secs};
+use config::service::{self, parse_duration_secs, ServiceType};
 use config::supervisor as sup_config;
 use config::validate;
 use ipc::init_channel::InitChannel;
@@ -170,21 +170,42 @@ fn main() {
     let mut frontier = dependency::frontier::StartupFrontier::new(&dep_graph);
     let mut readiness_trackers: std::collections::HashMap<String, process::readiness::ReadinessTracker> =
         std::collections::HashMap::new();
+    // Oneshot services waiting for process exit before being marked ready
+    let mut pending_oneshots: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     tracing::info!("starting services via dependency frontier");
 
     // Process the frontier until all services are started
     loop {
+        // Reap exited children during startup (handles oneshot completion)
+        reap_oneshots_during_startup(
+            &mut tree, &mut pending_oneshots, &mut frontier,
+            &dep_graph, &cgroup_hierarchy, &mut cgroup_monitor,
+        );
+
         // Start any services whose dependencies are satisfied
         let batch = frontier.take_ready();
         for name in &batch {
-            start_worker(&mut tree, name, &cgroup_hierarchy, &mut cgroup_monitor);
+            let ready_fd = start_worker(&mut tree, name, &cgroup_hierarchy, &mut cgroup_monitor);
 
             // Set up readiness tracking
             if let Some(w) = tree.get_worker(name) {
-                let tracker =
+                let is_oneshot = w.def.service.service_type == ServiceType::Oneshot;
+                let mut tracker =
                     process::readiness::ReadinessTracker::new(&w.def.readiness, name);
-                if tracker.is_immediate() {
+
+                // Wire in the ready_fd if present
+                if let Some(fd) = ready_fd {
+                    tracker.set_ready_fd(fd);
+                }
+
+                if is_oneshot && tracker.is_immediate() {
+                    // Oneshot with no readiness check: wait for process exit
+                    pending_oneshots.insert(name.clone());
+                    tracing::info!("service '{name}' is oneshot, waiting for exit");
+                } else if tracker.is_immediate() {
+                    // Long-running service with no readiness check: ready immediately
                     frontier.mark_ready(name, &dep_graph);
                     tracing::info!("service '{name}' ready (immediate)");
                 } else {
@@ -218,12 +239,12 @@ fn main() {
         }
 
         // If no more work to do, break out of startup
-        if !frontier.has_ready() && readiness_trackers.is_empty() {
+        if !frontier.has_ready() && readiness_trackers.is_empty() && pending_oneshots.is_empty() {
             break;
         }
 
         // Brief sleep to avoid busy-polling readiness checks
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     let blocked = frontier.blocked_services();
@@ -264,6 +285,12 @@ fn main() {
                         std::thread::sleep(Duration::from_millis(200));
                         reap_and_handle_exits(&mut tree, &cgroup_hierarchy, &mut cgroup_monitor);
                         start_worker(&mut tree, &name, &cgroup_hierarchy, &mut cgroup_monitor);
+                    }
+                    ipc::control::ControlAction::Reload => {
+                        tracing::info!("reload requested via control socket");
+                        reload_services(
+                            &mut tree, &cgroup_hierarchy, &mut cgroup_monitor,
+                        );
                     }
                     ipc::control::ControlAction::Shutdown(kind) => {
                         tracing::info!("shutdown requested via control socket");
@@ -336,15 +363,16 @@ fn main() {
 }
 
 /// Start a worker process and register it in the tree.
+/// Returns the ready_fd (read end) if the service uses fd-based readiness.
 fn start_worker(
     tree: &mut SupervisorTree,
     worker_id: &str,
     cgroup_hierarchy: &Option<cgroup::hierarchy::CgroupHierarchy>,
     cgroup_monitor: &mut cgroup::monitor::CgroupMonitor,
-) {
+) -> Option<std::os::unix::io::RawFd> {
     let def = match tree.get_worker(worker_id) {
         Some(w) => w.def.clone(),
-        None => return,
+        None => return None,
     };
 
     // Log namespace info if configured
@@ -381,6 +409,7 @@ fn start_worker(
     match spawn::spawn_service(&def) {
         Ok(spawned) => {
             let pid = spawned.pid.as_raw();
+            let ready_fd = spawned.ready_fd;
             tree.register_pid(worker_id, pid);
             if let Some(TreeNode::Worker(w)) = tree.get_mut(worker_id) {
                 w.state = ServiceState::Running;
@@ -394,6 +423,8 @@ fn start_worker(
                 // Start monitoring the cgroup
                 cgroup_monitor.watch(worker_id, &hierarchy.service_path(worker_id));
             }
+
+            ready_fd
         }
         Err(e) => {
             tracing::error!("failed to start '{}': {e}", worker_id);
@@ -407,6 +438,7 @@ fn start_worker(
             if let Some(hierarchy) = cgroup_hierarchy {
                 let _ = hierarchy.remove_service_cgroup(worker_id);
             }
+            None
         }
     }
 }
@@ -426,6 +458,100 @@ fn stop_worker(tree: &mut SupervisorTree, worker_id: &str) {
         );
         if let Some(TreeNode::Worker(w)) = tree.get_mut(worker_id) {
             w.state = ServiceState::Stopping { deadline: None };
+        }
+    }
+}
+
+/// Reap exited children during the startup phase, handling oneshot completion.
+/// Oneshot services that exit with code 0 are marked ready in the frontier;
+/// those that exit with nonzero are marked failed.
+fn reap_oneshots_during_startup(
+    tree: &mut SupervisorTree,
+    pending_oneshots: &mut std::collections::HashSet<String>,
+    frontier: &mut dependency::frontier::StartupFrontier,
+    dep_graph: &dependency::graph::DependencyGraph,
+    cgroup_hierarchy: &Option<cgroup::hierarchy::CgroupHierarchy>,
+    cgroup_monitor: &mut cgroup::monitor::CgroupMonitor,
+) {
+    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+
+    loop {
+        match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(pid, code)) => {
+                let worker_id = tree.unregister_pid(pid.as_raw());
+                if let Some(ref name) = worker_id {
+                    if pending_oneshots.remove(name.as_str()) {
+                        // This is a pending oneshot — mark ready or failed
+                        if code == 0 {
+                            tracing::info!("oneshot '{name}' completed (code 0)");
+                            if let Some(TreeNode::Worker(w)) = tree.get_mut(name) {
+                                w.pid = None;
+                                w.state = ServiceState::Stopped;
+                            }
+                            cgroup_monitor.unwatch(name);
+                            if let Some(hierarchy) = cgroup_hierarchy {
+                                let _ = hierarchy.remove_service_cgroup(name);
+                            }
+                            frontier.mark_ready(name, dep_graph);
+                        } else {
+                            tracing::error!("oneshot '{name}' failed (code {code})");
+                            if let Some(TreeNode::Worker(w)) = tree.get_mut(name) {
+                                w.pid = None;
+                                w.state = ServiceState::Failed {
+                                    exit_code: Some(code),
+                                    signal: None,
+                                };
+                            }
+                            cgroup_monitor.unwatch(name);
+                            if let Some(hierarchy) = cgroup_hierarchy {
+                                let _ = hierarchy.remove_service_cgroup(name);
+                            }
+                            frontier.mark_failed(name, dep_graph);
+                        }
+                        continue;
+                    }
+                }
+                // Not a pending oneshot — handle normally
+                if let Some(name) = worker_id {
+                    // Re-register PID temporarily so handle_child_exit can unregister it
+                    tree.register_pid(&name, pid.as_raw());
+                    handle_child_exit(tree, pid.as_raw(), ExitInfo {
+                        exit_code: Some(code),
+                        signal: None,
+                    }, cgroup_hierarchy, cgroup_monitor);
+                }
+            }
+            Ok(WaitStatus::Signaled(pid, sig, _)) => {
+                let worker_id = tree.unregister_pid(pid.as_raw());
+                if let Some(ref name) = worker_id {
+                    if pending_oneshots.remove(name.as_str()) {
+                        tracing::error!("oneshot '{name}' killed (signal {sig})");
+                        if let Some(TreeNode::Worker(w)) = tree.get_mut(name) {
+                            w.pid = None;
+                            w.state = ServiceState::Failed {
+                                exit_code: None,
+                                signal: Some(sig as i32),
+                            };
+                        }
+                        cgroup_monitor.unwatch(name);
+                        if let Some(hierarchy) = cgroup_hierarchy {
+                            let _ = hierarchy.remove_service_cgroup(name);
+                        }
+                        frontier.mark_failed(name, dep_graph);
+                        continue;
+                    }
+                }
+                if let Some(name) = worker_id {
+                    tree.register_pid(&name, pid.as_raw());
+                    handle_child_exit(tree, pid.as_raw(), ExitInfo {
+                        exit_code: None,
+                        signal: Some(sig as i32),
+                    }, cgroup_hierarchy, cgroup_monitor);
+                }
+            }
+            Ok(WaitStatus::StillAlive) => break,
+            Err(nix::errno::Errno::ECHILD) => break,
+            _ => break,
         }
     }
 }
@@ -563,4 +689,61 @@ fn execute_strategy_action(
         }
         start_worker(tree, child_id, cgroup_hierarchy, cgroup_monitor);
     }
+}
+
+/// Reload service definitions: re-scan /etc/dynamod/services/,
+/// add new services, remove deleted ones.
+fn reload_services(
+    tree: &mut SupervisorTree,
+    cgroup_hierarchy: &Option<cgroup::hierarchy::CgroupHierarchy>,
+    cgroup_monitor: &mut cgroup::monitor::CgroupMonitor,
+) {
+    let services_dir = std::path::Path::new(dynamod_common::paths::SERVICES_DIR);
+    let new_defs = match service::load_services_dir(services_dir) {
+        Ok(defs) => defs,
+        Err(e) => {
+            tracing::error!("reload: failed to load services: {e}");
+            return;
+        }
+    };
+
+    let existing: std::collections::HashSet<String> = tree
+        .all_workers()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let loaded: std::collections::HashSet<String> = new_defs
+        .iter()
+        .map(|d| d.service.name.clone())
+        .collect();
+
+    // Start new services that weren't previously loaded
+    let mut added = 0;
+    for def in &new_defs {
+        if !existing.contains(&def.service.name) {
+            let parent = &def.service.supervisor;
+            let parent_id = if tree.get(parent).is_some() {
+                parent.as_str()
+            } else {
+                "root"
+            };
+            if let Err(e) = tree.add_worker(def.clone(), parent_id) {
+                tracing::error!("reload: failed to add '{}': {e}", def.service.name);
+                continue;
+            }
+            start_worker(tree, &def.service.name, cgroup_hierarchy, cgroup_monitor);
+            added += 1;
+        }
+    }
+
+    // Stop and remove services that no longer have config files
+    let mut removed = 0;
+    for name in &existing {
+        if !loaded.contains(name) {
+            stop_worker(tree, name);
+            removed += 1;
+        }
+    }
+
+    tracing::info!("reload complete: {added} added, {removed} removed");
 }

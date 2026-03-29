@@ -1,6 +1,6 @@
 [service]
 name = "agetty-tty1"
-exec = ["/sbin/agetty", "--noclear", "tty1", "linux"]
+exec = ["/sbin/getty", "tty1", "38400", "linux"]
 type = "simple"
 
 [restart]
@@ -8,6 +8,9 @@ policy = "permanent"
 delay = "1s"
 max-restarts = 10
 max-restart-window = "30s"
+
+[dependencies]
+after = ["bootmisc", "mdev-coldplug"]
 
 [readiness]
 type = "none"

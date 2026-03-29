@@ -1,0 +1,18 @@
+[service]
+name = "bootmisc"
+supervisor = "early-boot"
+exec = ["/bin/sh", "-c", "mkdir -p /tmp /var/tmp /var/lock /var/log /var/spool/cron; chmod 1777 /tmp /var/tmp; rm -f /var/run/*.pid 2>/dev/null; true"]
+type = "oneshot"
+
+[restart]
+policy = "temporary"
+
+[dependencies]
+after = ["fstab-mount"]
+
+[readiness]
+type = "none"
+
+[shutdown]
+stop-signal = "SIGTERM"
+stop-timeout = "3s"

@@ -1,18 +1,15 @@
 [service]
-name = "network"
+name = "fstab-mount"
 supervisor = "early-boot"
-exec = ["/sbin/ip", "link", "set", "lo", "up"]
+exec = ["/bin/mount", "-a"]
 type = "oneshot"
 
 [restart]
 policy = "temporary"
-
-[dependencies]
-after = ["fstab-mount"]
 
 [readiness]
 type = "none"
 
 [shutdown]
 stop-signal = "SIGTERM"
-stop-timeout = "5s"
+stop-timeout = "3s"

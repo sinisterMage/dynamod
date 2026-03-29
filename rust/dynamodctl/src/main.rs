@@ -43,6 +43,8 @@ enum Command {
     List,
     /// Show the supervisor tree
     Tree,
+    /// Reload service definitions (add new, remove deleted)
+    Reload,
     /// Shut down the system
     Shutdown {
         /// Shutdown type: poweroff, reboot, or halt
@@ -62,6 +64,7 @@ fn main() {
         Command::Status { name } => commands::status(socket_path, &name),
         Command::List => commands::list(socket_path),
         Command::Tree => commands::tree(socket_path),
+        Command::Reload => commands::reload(socket_path),
         Command::Shutdown { kind } => commands::shutdown(socket_path, &kind),
     };
 

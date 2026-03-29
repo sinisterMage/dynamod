@@ -1,0 +1,8 @@
+[supervisor]
+name = "early-boot"
+parent = "root"
+strategy = "one-for-all"
+
+[restart]
+max-restarts = 3
+max-restart-window = "30s"
