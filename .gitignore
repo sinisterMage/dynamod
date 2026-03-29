@@ -9,7 +9,7 @@ rust/target/
 test/qemu/build/
 test/alpine/build/
 test/alpine/.cache/
-
+test/alpine/build-gui
 # Editor
 *.swp
 *.swo
