@@ -648,23 +648,44 @@ impl Manager {
 pub fn session_object_path(id: &str) -> String {
     format!(
         "/org/freedesktop/login1/session/{}",
-        escape_object_path_component(id)
+        systemd_escape(id)
     )
 }
 
 pub fn seat_object_path(id: &str) -> String {
     format!(
         "/org/freedesktop/login1/seat/{}",
+        // Seat IDs like "seat0" contain only safe chars so light escaping is fine
         escape_object_path_component(id)
     )
 }
 
 pub fn user_object_path(uid: u32) -> String {
-    format!("/org/freedesktop/login1/user/_{uid}")
+    format!(
+        "/org/freedesktop/login1/user/{}",
+        systemd_escape(&uid.to_string())
+    )
 }
 
-/// Escape a string for use in D-Bus object paths.
-/// Replace anything that's not [A-Za-z0-9] with _XX hex encoding.
+/// Escape a string using systemd's bus_label_escape scheme.
+///
+/// systemd encodes EVERY byte as `_XX` (two hex digits), producing
+/// paths like `/org/freedesktop/login1/session/_31` for session "1".
+/// This is what libelogind/libsystemd expects when it constructs
+/// session object paths from session IDs.
+pub fn systemd_escape(s: &str) -> String {
+    let mut out = String::new();
+    if s.is_empty() {
+        return "_".to_string();
+    }
+    for b in s.bytes() {
+        out.push_str(&format!("_{:02x}", b));
+    }
+    out
+}
+
+/// Light escaping for D-Bus object path components.
+/// Only escapes non-alphanumeric characters (used for seat IDs etc.).
 pub fn escape_object_path_component(s: &str) -> String {
     let mut out = String::new();
     if s.is_empty() {

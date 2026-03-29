@@ -85,19 +85,54 @@ if [ ! -f "$CACHE_DIR/$ALPINE_ROOTFS" ]; then
     curl -sL -o "$CACHE_DIR/$ALPINE_ROOTFS" "$ALPINE_URL"
 fi
 
-# Extract rootfs
-echo "Extracting Alpine rootfs..."
-cd "$BUILD_DIR/rootfs"
-tar xzf "$CACHE_DIR/$ALPINE_ROOTFS"
+# Cache the rootfs with dbus pre-installed to skip downloads on re-runs.
+DBUS_ROOTFS_CACHE="$CACHE_DIR/alpine-dbus-rootfs-${ALPINE_RELEASE}.tar.gz"
 
-# Install dynamod core binaries
+if [ -f "$DBUS_ROOTFS_CACHE" ]; then
+    echo "Using cached D-Bus rootfs ($DBUS_ROOTFS_CACHE)..."
+    cd "$BUILD_DIR/rootfs"
+    tar xzf "$DBUS_ROOTFS_CACHE"
+else
+    echo "Building D-Bus rootfs (first run — will be cached for next time)..."
+    cd "$BUILD_DIR/rootfs"
+    tar xzf "$CACHE_DIR/$ALPINE_ROOTFS"
+
+    # Install D-Bus packages via chroot
+    cp /etc/resolv.conf etc/resolv.conf 2>/dev/null || echo "nameserver 8.8.8.8" > etc/resolv.conf
+    mkdir -p etc/apk
+    echo "${ALPINE_MIRROR}/v${ALPINE_VERSION}/main" > etc/apk/repositories
+    echo "${ALPINE_MIRROR}/v${ALPINE_VERSION}/community" >> etc/apk/repositories
+
+    mount --bind /proc "$BUILD_DIR/rootfs/proc" 2>/dev/null || true
+    mount --bind /dev  "$BUILD_DIR/rootfs/dev"  2>/dev/null || true
+
+    chroot "$BUILD_DIR/rootfs" /sbin/apk add --no-cache dbus dbus-libs || {
+        echo "ERROR: Failed to install dbus inside Alpine chroot."
+        echo "  This may need root privileges. Try: sudo test/alpine/test-dbus.sh"
+        umount "$BUILD_DIR/rootfs/proc" 2>/dev/null || true
+        umount "$BUILD_DIR/rootfs/dev"  2>/dev/null || true
+        rm -rf "$BUILD_DIR"
+        exit 1
+    }
+
+    umount "$BUILD_DIR/rootfs/proc" 2>/dev/null || true
+    umount "$BUILD_DIR/rootfs/dev"  2>/dev/null || true
+
+    # Cache for future runs
+    echo "Caching D-Bus rootfs..."
+    cd "$BUILD_DIR/rootfs"
+    tar czf "$DBUS_ROOTFS_CACHE" .
+    echo "Cached at $DBUS_ROOTFS_CACHE ($(du -sh "$DBUS_ROOTFS_CACHE" | cut -f1))"
+fi
+
+cd "$BUILD_DIR/rootfs"
+
+# Install dynamod binaries (always fresh — not cached)
 echo "Installing dynamod..."
 install -Dm755 "$ZIG_OUT/dynamod-init"      sbin/dynamod-init
 install -Dm755 "$CARGO_OUT/dynamod-svmgr"   usr/lib/dynamod/dynamod-svmgr
 install -Dm755 "$CARGO_OUT/dynamodctl"       usr/bin/dynamodctl
 install -Dm755 "$CARGO_OUT/dynamod-logd"     usr/lib/dynamod/dynamod-logd
-
-# Install systemd-mimic binaries
 install -Dm755 "$CARGO_OUT/dynamod-logind"      usr/lib/dynamod/dynamod-logind
 install -Dm755 "$CARGO_OUT/dynamod-sd1bridge"   usr/lib/dynamod/dynamod-sd1bridge
 install -Dm755 "$CARGO_OUT/dynamod-hostnamed"   usr/lib/dynamod/dynamod-hostnamed
@@ -112,31 +147,6 @@ for svc in fstab-mount modules-load mdev-coldplug bootmisc hostname \
         cp "$PROJECT_ROOT/config/services/${svc}.toml" etc/dynamod/services/
     fi
 done
-
-# Install D-Bus packages into the rootfs.
-# Alpine minirootfs includes apk, so we chroot into it and run apk from there.
-# This works on any host OS (Fedora, Arch, Debian, etc.).
-echo "Installing D-Bus packages into rootfs..."
-cp /etc/resolv.conf etc/resolv.conf 2>/dev/null || echo "nameserver 8.8.8.8" > etc/resolv.conf
-mkdir -p etc/apk
-echo "${ALPINE_MIRROR}/v${ALPINE_VERSION}/main" > etc/apk/repositories
-echo "${ALPINE_MIRROR}/v${ALPINE_VERSION}/community" >> etc/apk/repositories
-
-# Mount /proc and /dev so apk works inside the chroot
-mount --bind /proc "$BUILD_DIR/rootfs/proc" 2>/dev/null || true
-mount --bind /dev  "$BUILD_DIR/rootfs/dev"  2>/dev/null || true
-
-chroot "$BUILD_DIR/rootfs" /sbin/apk add --no-cache dbus dbus-libs || {
-    echo "ERROR: Failed to install dbus inside Alpine chroot."
-    echo "  This may need root privileges. Try: sudo test/alpine/test-dbus.sh"
-    umount "$BUILD_DIR/rootfs/proc" 2>/dev/null || true
-    umount "$BUILD_DIR/rootfs/dev"  2>/dev/null || true
-    rm -rf "$BUILD_DIR"
-    exit 1
-}
-
-umount "$BUILD_DIR/rootfs/proc" 2>/dev/null || true
-umount "$BUILD_DIR/rootfs/dev"  2>/dev/null || true
 
 # Verify dbus-daemon was installed
 if [ ! -f "$BUILD_DIR/rootfs/usr/bin/dbus-daemon" ]; then

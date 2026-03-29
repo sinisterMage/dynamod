@@ -81,10 +81,60 @@ fi
 
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR/rootfs"
-cd "$BUILD_DIR/rootfs"
-tar xzf "$CACHE_DIR/$ALPINE_ROOTFS"
 
-# Install dynamod binaries
+# Cache the rootfs with sway packages pre-installed to skip downloads on re-runs.
+SWAY_ROOTFS_CACHE="$CACHE_DIR/alpine-sway-rootfs-${ALPINE_RELEASE}.tar.gz"
+
+if [ -f "$SWAY_ROOTFS_CACHE" ]; then
+    echo "Using cached sway rootfs ($SWAY_ROOTFS_CACHE)..."
+    cd "$BUILD_DIR/rootfs"
+    tar xzf "$SWAY_ROOTFS_CACHE"
+else
+    echo "Building sway rootfs (first run — will be cached for next time)..."
+    cd "$BUILD_DIR/rootfs"
+    tar xzf "$CACHE_DIR/$ALPINE_ROOTFS"
+
+    # Install Wayland packages via chroot
+    cp /etc/resolv.conf etc/resolv.conf 2>/dev/null || echo "nameserver 8.8.8.8" > etc/resolv.conf
+    mkdir -p etc/apk
+    echo "${ALPINE_MIRROR}/v${ALPINE_VERSION}/main" > etc/apk/repositories
+    echo "${ALPINE_MIRROR}/v${ALPINE_VERSION}/community" >> etc/apk/repositories
+
+    mount --bind /proc "$BUILD_DIR/rootfs/proc" 2>/dev/null || true
+    mount --bind /dev  "$BUILD_DIR/rootfs/dev"  2>/dev/null || true
+
+    chroot "$BUILD_DIR/rootfs" /sbin/apk add --no-cache \
+        dbus dbus-libs \
+        sway swaybg \
+        seatd \
+        foot \
+        mesa-dri-gallium mesa-gbm \
+        libinput \
+        xkeyboard-config \
+        eudev \
+        || {
+        echo ""
+        echo "ERROR: Failed to install packages inside Alpine chroot."
+        echo "  This needs root privileges. Try: sudo test/alpine/boot-wayland.sh"
+        umount "$BUILD_DIR/rootfs/proc" 2>/dev/null || true
+        umount "$BUILD_DIR/rootfs/dev"  2>/dev/null || true
+        rm -rf "$BUILD_DIR"
+        exit 1
+    }
+
+    umount "$BUILD_DIR/rootfs/proc" 2>/dev/null || true
+    umount "$BUILD_DIR/rootfs/dev"  2>/dev/null || true
+
+    # Cache for future runs
+    echo "Caching sway rootfs..."
+    cd "$BUILD_DIR/rootfs"
+    tar czf "$SWAY_ROOTFS_CACHE" .
+    echo "Cached at $SWAY_ROOTFS_CACHE ($(du -sh "$SWAY_ROOTFS_CACHE" | cut -f1))"
+fi
+
+cd "$BUILD_DIR/rootfs"
+
+# Install dynamod binaries (always fresh — not cached)
 echo "Installing dynamod..."
 install -Dm755 "$ZIG_OUT/dynamod-init"      sbin/dynamod-init
 install -Dm755 "$CARGO_OUT/dynamod-svmgr"   usr/lib/dynamod/dynamod-svmgr
@@ -108,38 +158,6 @@ done
 # Install D-Bus policy files
 mkdir -p usr/share/dbus-1/system.d
 cp "$PROJECT_ROOT/config/dbus-1/"*.conf usr/share/dbus-1/system.d/
-
-# Install Wayland packages into the rootfs via chroot.
-echo "Installing sway + Wayland packages (this may take a moment)..."
-cp /etc/resolv.conf etc/resolv.conf 2>/dev/null || echo "nameserver 8.8.8.8" > etc/resolv.conf
-mkdir -p etc/apk
-echo "${ALPINE_MIRROR}/v${ALPINE_VERSION}/main" > etc/apk/repositories
-echo "${ALPINE_MIRROR}/v${ALPINE_VERSION}/community" >> etc/apk/repositories
-
-mount --bind /proc "$BUILD_DIR/rootfs/proc" 2>/dev/null || true
-mount --bind /dev  "$BUILD_DIR/rootfs/dev"  2>/dev/null || true
-
-chroot "$BUILD_DIR/rootfs" /sbin/apk add --no-cache \
-    dbus dbus-libs \
-    sway swaybg \
-    seatd \
-    foot \
-    mesa-dri-gallium mesa-gbm \
-    libinput \
-    xkeyboard-config \
-    eudev \
-    || {
-    echo ""
-    echo "ERROR: Failed to install packages inside Alpine chroot."
-    echo "  This needs root privileges. Try: sudo test/alpine/boot-wayland.sh"
-    umount "$BUILD_DIR/rootfs/proc" 2>/dev/null || true
-    umount "$BUILD_DIR/rootfs/dev"  2>/dev/null || true
-    rm -rf "$BUILD_DIR"
-    exit 1
-}
-
-umount "$BUILD_DIR/rootfs/proc" 2>/dev/null || true
-umount "$BUILD_DIR/rootfs/dev"  2>/dev/null || true
 
 # D-Bus system config
 if [ ! -f etc/dbus-1/system.conf ]; then
