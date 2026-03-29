@@ -18,3 +18,6 @@ test/qemu/build/
 # OS
 .DS_Store
 Thumbs.db
+linux-6.19.10
+linux-6.19.10.tar.xz
+busybox

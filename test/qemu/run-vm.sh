@@ -58,13 +58,21 @@ mkdir -p "$BUILD_DIR/initramfs"/{bin,sbin,etc/dynamod/services,etc/dynamod/super
 
 # Copy dynamod binaries
 cp "$PROJECT_DIR/zig/zig-out/bin/dynamod-init" "$BUILD_DIR/initramfs/sbin/init"
-cp "$PROJECT_DIR/rust/target/release/dynamod-svmgr" "$BUILD_DIR/initramfs/usr/lib/dynamod/"
-cp "$PROJECT_DIR/rust/target/release/dynamodctl" "$BUILD_DIR/initramfs/bin/"
-cp "$PROJECT_DIR/rust/target/release/dynamod-logd" "$BUILD_DIR/initramfs/usr/lib/dynamod/"
+# Find Rust binaries (musl target uses a different path)
+RUST_BIN="$PROJECT_DIR/rust/target/release"
+if [ -f "$PROJECT_DIR/rust/target/x86_64-unknown-linux-musl/release/dynamod-svmgr" ]; then
+    RUST_BIN="$PROJECT_DIR/rust/target/x86_64-unknown-linux-musl/release"
+fi
+cp "$RUST_BIN/dynamod-svmgr" "$BUILD_DIR/initramfs/usr/lib/dynamod/"
+cp "$RUST_BIN/dynamodctl" "$BUILD_DIR/initramfs/bin/"
+cp "$RUST_BIN/dynamod-logd" "$BUILD_DIR/initramfs/usr/lib/dynamod/"
 
 # Copy busybox if available (for shell access)
-BUSYBOX=$(command -v busybox 2>/dev/null || true)
-if [ -n "$BUSYBOX" ] && file "$BUSYBOX" | grep -q "statically linked"; then
+BUSYBOX="${SCRIPT_DIR}/busybox"
+if [ ! -f "$BUSYBOX" ]; then
+    BUSYBOX=$(command -v busybox 2>/dev/null || true)
+fi
+if [ -n "$BUSYBOX" ] && [ -f "$BUSYBOX" ] && file "$BUSYBOX" | grep -q "statically linked"; then
     cp "$BUSYBOX" "$BUILD_DIR/initramfs/bin/busybox"
     # Create common symlinks
     for cmd in sh ls cat echo sleep true false kill ps mount umount mkdir; do
@@ -108,15 +116,16 @@ log "Booting QEMU (timeout ${TIMEOUT}s)..."
 log "Console output:"
 echo "---"
 
-timeout "$TIMEOUT" qemu-system-x86_64 \
+timeout --foreground "$TIMEOUT" \
+    qemu-system-x86_64 \
     -kernel "$KERNEL" \
     -initrd "$BUILD_DIR/initramfs.cpio.gz" \
-    -append "console=ttyS0 panic=1 init=/sbin/init" \
+    -append "console=ttyS0 earlyprintk=ttyS0 panic=1 rdinit=/sbin/init" \
     -nographic \
     -no-reboot \
     -m 256M \
-    -smp 2 \
-    2>&1 || true
+    -smp 1 \
+    || true
 
 echo "---"
 log "QEMU session ended."

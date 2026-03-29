@@ -4,7 +4,7 @@ DESTDIR ?=
 PREFIX  ?= /usr/local
 
 ZIG_OUT   := zig/zig-out/bin
-CARGO_OUT := rust/target/release
+CARGO_OUT := $(shell if [ -d rust/target/x86_64-unknown-linux-musl/release ]; then echo rust/target/x86_64-unknown-linux-musl/release; else echo rust/target/release; fi)
 
 all: zig rust
 

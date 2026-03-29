@@ -96,8 +96,14 @@ pub enum ShutdownKind {
 }
 
 /// Encode a message into the wire format (magic + length + msgpack).
+/// Uses struct-as-map serialization so fields have string keys,
+/// which the Zig msgpack decoder can look up by name.
 pub fn encode(msg: &Message) -> Result<Vec<u8>, EncodeError> {
-    let payload = rmp_serde::to_vec(msg).map_err(EncodeError::Serialize)?;
+    let mut buf = Vec::new();
+    let mut serializer = rmp_serde::Serializer::new(&mut buf).with_struct_map();
+    serde::Serialize::serialize(msg, &mut serializer)
+        .map_err(EncodeError::Serialize)?;
+    let payload = buf;
 
     if payload.len() > MAX_MESSAGE_SIZE as usize {
         return Err(EncodeError::TooLarge(payload.len()));
