@@ -29,3 +29,32 @@ pub const svmgr_restart_initial_ms: u32 = 500;
 
 /// Svmgr restart backoff: maximum delay in milliseconds.
 pub const svmgr_restart_max_ms: u32 = 30_000;
+
+// --- Initramfs / switch_root constants ---
+
+/// Mount point for the real root filesystem during switch_root.
+pub const newroot_path: [*:0]const u8 = "/newroot";
+
+/// Kernel command line path (available after /proc is mounted).
+pub const proc_cmdline_path = "/proc/cmdline";
+
+/// Filesystem magic numbers from statfs(2) for initramfs detection.
+pub const RAMFS_MAGIC: i64 = 0x858458f6;
+pub const TMPFS_MAGIC: i64 = 0x01021994;
+
+/// Mount flag: move an existing mount to a new location.
+pub const MS_MOVE: u32 = 0x2000;
+pub const MS_RDONLY: u32 = 0x01;
+pub const MS_REMOUNT: u32 = 0x20;
+
+/// How often to poll for root device when rootwait is set (ms).
+pub const rootwait_poll_ms: u32 = 250;
+
+/// Maximum time to wait for root device (seconds).
+pub const rootwait_max_s: u32 = 30;
+
+/// Init binary path (used for re-exec after switch_root).
+pub const init_path: [*:0]const u8 = "/sbin/dynamod-init";
+
+/// Path to mdev binary (busybox applet, for device node creation).
+pub const mdev_path: [*:0]const u8 = "/sbin/mdev";

@@ -68,5 +68,8 @@ test-alpine: all
 test-dbus: all
 	test/alpine/test-dbus.sh
 
+test-disk: all
+	test/alpine/boot-disk.sh
+
 fmt:
 	cd rust && cargo fmt --all

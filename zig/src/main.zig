@@ -1,9 +1,15 @@
 /// dynamod-init: PID 1 entry point.
 ///
 /// This is the first userspace process started by the Linux kernel.
-/// It performs early boot (mount pseudo-filesystems, set hostname),
-/// spawns the service manager (dynamod-svmgr), and enters the main
-/// event loop for signal handling and zombie reaping.
+/// It supports two-phase boot:
+///
+/// 1. **Initramfs phase** (if running on ramfs/tmpfs with root= in cmdline):
+///    Mount pseudo-fs, detect root device, mount it, switch_root, re-exec.
+///
+/// 2. **Real root phase** (normal boot or after switch_root):
+///    Mount pseudo-fs, set hostname, seed entropy, spawn dynamod-svmgr.
+///
+/// The same binary handles both phases. Detection is automatic via statfs("/").
 ///
 /// Design constraints:
 /// - No heap allocations after initialization
@@ -20,6 +26,8 @@ const child = @import("child.zig");
 const event_loop = @import("event_loop.zig");
 const constants = @import("constants.zig");
 const shutdown_mod = @import("shutdown.zig");
+const cmdline_mod = @import("cmdline.zig");
+const switchroot = @import("switchroot.zig");
 
 pub fn main() noreturn {
     // Phase 0: Early boot
@@ -30,6 +38,19 @@ pub fn main() noreturn {
     const klog = kmsg.init();
     if (klog) |k| k.info("dynamod-init starting (PID 1)", .{});
 
+    // Check if we're in an initramfs and need to switch_root
+    if (boot.isInitramfs()) {
+        const cl = cmdline_mod.Cmdline.read(klog);
+        if (cl.getRoot() != null) {
+            // Initramfs mode: mount real root and switch to it
+            // This calls execve and does NOT return.
+            switchroot.doSwitchRoot(&cl, klog);
+        }
+        // No root= parameter: stay in initramfs (test/development mode)
+        if (klog) |k| k.info("initramfs mode: no root= param, staying in initramfs", .{});
+    }
+
+    // Phase 1: Real root boot (runs after switch_root or when booted directly)
     // Create runtime directory
     boot.createRuntimeDir(klog);
 

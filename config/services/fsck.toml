@@ -1,0 +1,15 @@
+[service]
+name = "fsck"
+supervisor = "early-boot"
+exec = ["/bin/sh", "-c", "if [ -f /forcefsck ] || grep -q 'fsck.mode=force' /proc/cmdline; then fsck -Aay; rm -f /forcefsck; fi"]
+type = "oneshot"
+
+[restart]
+policy = "temporary"
+
+[readiness]
+type = "none"
+
+[shutdown]
+stop-signal = "SIGTERM"
+stop-timeout = "30s"

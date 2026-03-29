@@ -108,7 +108,68 @@ fn saveRandomSeed(klog: ?kmsg) void {
 }
 
 fn unmountAll(klog: ?kmsg) void {
-    // Unmount in reverse order of mounting
+    // Try to read /proc/mounts to discover all mount points.
+    // This handles real root filesystems with additional mounts (/home, /boot, etc.)
+    // beyond the 7 hardcoded pseudo-filesystems.
+    var mounts_buf: [8192]u8 = undefined;
+    const mounts_len = blk: {
+        const file = std.fs.openFileAbsolute("/proc/mounts", .{}) catch break :blk @as(usize, 0);
+        defer file.close();
+        break :blk file.read(&mounts_buf) catch 0;
+    };
+
+    if (mounts_len > 0) {
+        unmountFromProc(mounts_buf[0..mounts_len], klog);
+    } else {
+        unmountHardcoded(klog);
+    }
+}
+
+/// Unmount all filesystems discovered from /proc/mounts, in reverse order.
+/// Skips "/" itself (handled separately by remountRootReadonly).
+fn unmountFromProc(data: []const u8, klog: ?kmsg) void {
+    // Parse mount targets (second field in each line of /proc/mounts).
+    // Store them so we can unmount in reverse order.
+    var targets: [64][256]u8 = undefined;
+    var target_lens: [64]usize = .{0} ** 64;
+    var count: usize = 0;
+
+    var lines = std.mem.tokenizeScalar(u8, data, '\n');
+    while (lines.next()) |line| {
+        if (count >= targets.len) break;
+        // Format: device mountpoint fstype options dump pass
+        var fields = std.mem.tokenizeScalar(u8, line, ' ');
+        _ = fields.next(); // skip device
+        const mountpoint = fields.next() orelse continue;
+
+        // Skip root (handled by remountRootReadonly)
+        if (mountpoint.len == 1 and mountpoint[0] == '/') continue;
+
+        if (mountpoint.len >= targets[0].len) continue;
+        @memcpy(targets[count][0..mountpoint.len], mountpoint);
+        targets[count][mountpoint.len] = 0;
+        target_lens[count] = mountpoint.len;
+        count += 1;
+    }
+
+    // Unmount in reverse order (last mounted = first unmounted)
+    var i: usize = count;
+    while (i > 0) {
+        i -= 1;
+        const name = targets[i][0..target_lens[i]];
+        const target_z: [*:0]const u8 = @ptrCast(targets[i][0..target_lens[i] :0]);
+        const rc = linux.umount2(target_z, linux.MNT.DETACH);
+        const e = linux.E.init(rc);
+        if (e != .SUCCESS and e != .INVAL and e != .NOENT) {
+            if (klog) |k| k.warn("failed to unmount {s}: errno {d}", .{ name, @intFromEnum(e) });
+        } else if (e == .SUCCESS) {
+            if (klog) |k| k.info("unmounted {s}", .{name});
+        }
+    }
+}
+
+/// Fallback: unmount hardcoded pseudo-filesystem paths.
+fn unmountHardcoded(klog: ?kmsg) void {
     const targets = [_][*:0]const u8{
         "/sys/fs/cgroup",
         "/dev/shm",

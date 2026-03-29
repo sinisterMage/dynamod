@@ -13,6 +13,7 @@ test/alpine/build-gui
 test/alpine/build-dbus
 test/alpine/build-wayland
 test/alpine/build-gnome
+test/alpine/build-disk
 # Editor
 *.swp
 *.swo

@@ -143,6 +143,21 @@ pub fn ensureMachineId(klog_arg: ?kmsg) void {
     if (klog_arg) |k| k.info("generated {s}", .{constants.machine_id_path});
 }
 
+/// Detect if we're running in an initramfs (rootfs or tmpfs).
+/// Returns true if the root filesystem is RAMFS or TMPFS, indicating
+/// we're in an initramfs and may need to switch_root to a real rootfs.
+pub fn isInitramfs() bool {
+    // Use raw syscall since Zig std doesn't expose a statfs struct.
+    // statfs64 struct layout for x86_64: f_type is the first i64 field.
+    var buf: [120]u8 = undefined; // statfs64 is ~120 bytes on x86_64
+    const root: [*:0]const u8 = "/";
+    const rc = linux.syscall2(.statfs, @intFromPtr(root), @intFromPtr(&buf));
+    if (linux.E.init(rc) != .SUCCESS) return false;
+    // f_type is the first field, an i64 (8 bytes) on x86_64
+    const f_type = std.mem.readInt(i64, buf[0..8], .little);
+    return f_type == constants.RAMFS_MAGIC or f_type == constants.TMPFS_MAGIC;
+}
+
 /// Seed the kernel PRNG from saved random seed.
 pub fn seedEntropy(klog_arg: ?kmsg) void {
     const seed_file = std.fs.openFileAbsolute(constants.random_seed_path, .{}) catch return;
