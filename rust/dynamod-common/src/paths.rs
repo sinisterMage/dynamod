@@ -14,3 +14,6 @@ pub const SUPERVISORS_DIR: &str = "/etc/dynamod/supervisors";
 
 /// Environment variable name for the init socket fd.
 pub const INIT_FD_ENV: &str = "DYNAMOD_INIT_FD";
+
+/// Machine ID file path (32 hex characters, no dashes).
+pub const MACHINE_ID: &str = "/etc/machine-id";

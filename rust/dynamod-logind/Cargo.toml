@@ -1,0 +1,15 @@
+[package]
+name = "dynamod-logind"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dynamod-common = { path = "../dynamod-common" }
+zbus = { workspace = true }
+tokio = { workspace = true }
+nix = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+libc = "0.2"

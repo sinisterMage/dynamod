@@ -1,0 +1,22 @@
+[service]
+name = "dbus"
+supervisor = "root"
+exec = ["/usr/bin/dbus-daemon", "--system", "--nofork", "--nopidfile"]
+type = "simple"
+
+[restart]
+policy = "permanent"
+delay = "1s"
+max-restarts = 10
+max-restart-window = "60s"
+
+[readiness]
+type = "none"
+timeout = "10s"
+
+[dependencies]
+after = ["syslog"]
+
+[shutdown]
+stop-signal = "SIGTERM"
+stop-timeout = "5s"

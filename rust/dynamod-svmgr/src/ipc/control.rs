@@ -196,6 +196,10 @@ fn handle_request(
         MessageBody::Reload => {
             (MessageBody::Ack, Some(ControlAction::Reload))
         }
+        MessageBody::GetServiceByPid { pid } => {
+            let name = tree.worker_for_pid(pid).map(|s| s.to_string());
+            (MessageBody::ServiceByPid { name, pid }, None)
+        }
         _ => (
             MessageBody::Error {
                 message: "unknown command".to_string(),

@@ -43,7 +43,7 @@ pub enum MessageBody {
     /// svmgr -> init: Write to kernel log.
     LogToKmsg { level: u8, message: String },
 
-    // === dynamodctl <-> svmgr (control socket) ===
+    // === dynamodctl / bridge <-> svmgr (control socket) ===
     /// Start a service by name.
     StartService { name: String },
     /// Stop a service by name.
@@ -60,6 +60,8 @@ pub enum MessageBody {
     Reload,
     /// Initiate system shutdown.
     Shutdown { kind: ShutdownKind },
+    /// Look up the service that owns a given PID.
+    GetServiceByPid { pid: i32 },
 
     // === Responses ===
     /// Generic acknowledgment.
@@ -77,6 +79,11 @@ pub enum MessageBody {
     ServiceList { services: Vec<ServiceEntry> },
     /// Supervisor tree response.
     Tree { text: String },
+    /// Response to GetServiceByPid.
+    ServiceByPid {
+        name: Option<String>,
+        pid: i32,
+    },
 }
 
 /// A service entry in a list response.

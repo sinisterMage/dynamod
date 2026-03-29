@@ -1,0 +1,8 @@
+[supervisor]
+name = "desktop"
+parent = "root"
+strategy = "one-for-one"
+
+[restart]
+max-restarts = 10
+max-restart-window = "120s"

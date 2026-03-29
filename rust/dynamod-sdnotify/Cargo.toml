@@ -1,0 +1,11 @@
+[package]
+name = "dynamod-sdnotify"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "systemd"
+crate-type = ["cdylib"]
+
+[dependencies]
+libc = "0.2"

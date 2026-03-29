@@ -39,6 +39,9 @@ pub fn main() noreturn {
     // Seed entropy
     boot.seedEntropy(klog);
 
+    // Generate /etc/machine-id if missing (needed for D-Bus and desktop tools)
+    boot.ensureMachineId(klog);
+
     if (klog) |k| k.info("early boot complete", .{});
 
     // Phase 1: Set up signal handling

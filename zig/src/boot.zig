@@ -94,6 +94,55 @@ pub fn setHostname(klog_arg: ?kmsg) void {
     }
 }
 
+/// Generate /etc/machine-id if it does not exist.
+/// The machine-id is a 32-character lowercase hex string followed by a newline.
+/// Many D-Bus consumers and desktop tools expect this file to exist.
+pub fn ensureMachineId(klog_arg: ?kmsg) void {
+    // Check if machine-id already exists and has content
+    if (std.fs.openFileAbsolute(constants.machine_id_path, .{})) |file| {
+        defer file.close();
+        var buf: [33]u8 = undefined;
+        const len = file.read(&buf) catch 0;
+        if (len >= 32) return; // Already has a valid machine-id
+    } else |_| {}
+
+    // Generate 16 random bytes from /dev/urandom
+    const urandom = std.fs.openFileAbsolute("/dev/urandom", .{}) catch {
+        if (klog_arg) |k| k.warn("cannot open /dev/urandom for machine-id", .{});
+        return;
+    };
+    defer urandom.close();
+
+    var random_bytes: [16]u8 = undefined;
+    _ = urandom.read(&random_bytes) catch {
+        if (klog_arg) |k| k.warn("cannot read /dev/urandom for machine-id", .{});
+        return;
+    };
+
+    // Convert to 32 hex characters + newline
+    const hex_chars = "0123456789abcdef";
+    var hex_buf: [33]u8 = undefined;
+    for (random_bytes, 0..) |byte, i| {
+        hex_buf[i * 2] = hex_chars[byte >> 4];
+        hex_buf[i * 2 + 1] = hex_chars[byte & 0x0f];
+    }
+    hex_buf[32] = '\n';
+
+    // Write machine-id file
+    const file = std.fs.createFileAbsolute(constants.machine_id_path, .{}) catch {
+        if (klog_arg) |k| k.warn("cannot create {s}", .{constants.machine_id_path});
+        return;
+    };
+    defer file.close();
+
+    _ = file.write(&hex_buf) catch {
+        if (klog_arg) |k| k.warn("cannot write {s}", .{constants.machine_id_path});
+        return;
+    };
+
+    if (klog_arg) |k| k.info("generated {s}", .{constants.machine_id_path});
+}
+
 /// Seed the kernel PRNG from saved random seed.
 pub fn seedEntropy(klog_arg: ?kmsg) void {
     const seed_file = std.fs.openFileAbsolute(constants.random_seed_path, .{}) catch return;

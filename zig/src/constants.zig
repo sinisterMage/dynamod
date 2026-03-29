@@ -4,6 +4,7 @@ pub const control_sock = "/run/dynamod/control.sock";
 pub const svmgr_path = "/usr/lib/dynamod/dynamod-svmgr";
 pub const hostname_path = "/etc/hostname";
 pub const random_seed_path = "/var/lib/dynamod/random-seed";
+pub const machine_id_path = "/etc/machine-id";
 
 /// Environment variable name for passing the init socket fd to svmgr.
 pub const init_fd_env = "DYNAMOD_INIT_FD";

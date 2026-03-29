@@ -10,6 +10,9 @@ test/qemu/build/
 test/alpine/build/
 test/alpine/.cache/
 test/alpine/build-gui
+test/alpine/build-dbus
+test/alpine/build-wayland
+test/alpine/build-gnome
 # Editor
 *.swp
 *.swo
