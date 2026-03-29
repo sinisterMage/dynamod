@@ -1,185 +1,304 @@
-# Dynamod Architecture
+# Architecture
 
-Dynamod is a Linux-only PID 1 init system with a microkernel-inspired architecture.
-Each component runs as its own process, communicating via Unix domain sockets
-with MessagePack-framed messages.
+dynamod is a Linux-only PID 1 init system with a microkernel-inspired design.
+Each component runs as its own process, communicating over Unix domain sockets
+with MessagePack-framed messages. The init itself is intentionally tiny — all
+the interesting logic lives in the service manager.
 
-## Components
+## The big picture
 
 ```
 kernel
   └── dynamod-init (PID 1, Zig)
+        │
+        │  Phase A (initramfs):
+        │    mount /proc, /sys, /dev
+        │    parse root= from /proc/cmdline
+        │    mount root device on /newroot
+        │    switch_root → re-exec from real rootfs
+        │
+        │  Phase B (real root):
+        │    mount remaining pseudo-fs
+        │    set hostname, seed entropy
+        │    spawn dynamod-svmgr via socketpair
+        │    enter epoll event loop
+        │
         ├── dynamod-svmgr (Rust)
-        │     ├── dynamod-logd (Rust)
-        │     ├── [supervisor: network]
-        │     │     ├── dhcpcd
-        │     │     └── resolved
-        │     └── [supervisor: data]
-        │           └── postgresql
-        └── (agetty on tty1)
+        │     ├── [supervisor: early-boot] (one-for-all)
+        │     │     ├── fsck
+        │     │     ├── remount-root-rw
+        │     │     ├── fstab-mount
+        │     │     ├── modules-load
+        │     │     ├── mdev-coldplug
+        │     │     ├── bootmisc
+        │     │     └── network
+        │     │
+        │     ├── [supervisor: desktop] (one-for-one)
+        │     │     ├── dbus
+        │     │     ├── dynamod-logind    (login1)
+        │     │     ├── dynamod-sd1bridge (systemd1)
+        │     │     └── dynamod-hostnamed (hostname1)
+        │     │
+        │     ├── sshd
+        │     ├── nginx
+        │     ├── postgresql
+        │     └── ...
+        │
+        └── (console login on tty1)
 ```
+
+## Components
 
 ### dynamod-init (Zig)
 
-The PID 1 process. Intentionally minimal (~600 lines of Zig) to minimize
-the chance of a crash that would bring down the entire system.
+The PID 1 process. Intentionally minimal (~800 lines of Zig) to minimize
+the chance of a crash that would bring down the system.
 
-**Responsibilities:**
-- Mount essential pseudo-filesystems (`/proc`, `/sys`, `/dev`, `/run`, `/sys/fs/cgroup`)
-- Set hostname, seed entropy
-- Spawn and monitor `dynamod-svmgr` (restart with exponential backoff on crash)
-- Zombie reaping for all orphaned processes
-- Signal handling via `signalfd` + `epoll`
-- System shutdown sequence (SIGTERM → SIGKILL → sync → unmount → reboot)
-- Forward shutdown requests between kernel signals and svmgr
+**What it does:**
+
+- **Two-phase boot**: detects whether it's in an initramfs (via `statfs("/")`),
+  and if `root=` is on the kernel cmdline, performs the full initramfs-to-rootfs
+  transition (mount root, move pseudo-fs, delete initramfs, `switch_root`, re-exec)
+- **Mount pseudo-filesystems**: `/proc`, `/sys`, `/dev`, `/dev/pts`, `/dev/shm`,
+  `/run`, `/sys/fs/cgroup`
+- **Early system setup**: set hostname, seed entropy, generate `/etc/machine-id`
+- **Spawn and babysit dynamod-svmgr**: restart with exponential backoff on crash
+  (500ms initial, 30s max)
+- **Zombie reaping**: collects exit status for all orphaned processes
+- **Signal handling**: via `signalfd` + `epoll` (SIGCHLD, SIGTERM, SIGINT, SIGUSR1/2)
+- **Shutdown**: SIGTERM all → wait 5s → SIGKILL → sync → unmount all → remount
+  root read-only → `reboot(2)`
 
 **Design constraints:**
+
 - No heap allocations after initialization
-- No panics — all error paths handled
-- Fixed-size buffers only
-- Statically linked (no libc dependency)
+- No panics — every error path is handled
+- Fixed-size buffers only (4KB cmdline, 8KB dirent, etc.)
+- Statically linked against musl (no libc dependency at runtime)
 
 ### dynamod-svmgr (Rust)
 
-The service manager. The "brain" of the system.
+The service manager — the "brain" of the system.
 
-**Responsibilities:**
-- Parse TOML service and supervisor configurations
-- Build and validate the dependency DAG (cycle detection)
-- Manage OTP-style supervisor trees (one-for-one, one-for-all, rest-for-one)
-- Spawn services via fork/exec with namespace and cgroup isolation
-- Dynamic frontier algorithm for maximum-parallelism startup
-- Readiness detection (sd_notify, TCP port, exec check, immediate)
-- Graceful shutdown in reverse dependency order
-- Control socket for `dynamodctl`
-- Heartbeat protocol with `dynamod-init`
+**What it does:**
+
+- Parses TOML service and supervisor configurations from `/etc/dynamod/`
+- Builds and validates the dependency DAG (rejects cycles)
+- Manages OTP-style supervisor trees (see below)
+- Spawns services via `fork`/`exec` with namespace and cgroup isolation
+- Runs a dynamic frontier algorithm for maximum-parallelism startup
+- Detects readiness via sd_notify, TCP port, exec check, or file descriptor
+- Handles graceful shutdown in reverse dependency order
+- Listens on `/run/dynamod/control.sock` for `dynamodctl` commands
+- Maintains a heartbeat protocol with dynamod-init (5s interval)
 
 ### dynamodctl (Rust)
 
-CLI tool for operators. Connects to the control socket at
-`/run/dynamod/control.sock`.
+CLI tool for operators. Connects to the control socket.
 
-**Commands:**
-- `dynamodctl start <name>` — Start a service
-- `dynamodctl stop <name>` — Stop a service
-- `dynamodctl restart <name>` — Restart a service
-- `dynamodctl status <name>` — Show service status
-- `dynamodctl list` — List all services with status
-- `dynamodctl tree` — Show the supervisor tree
-- `dynamodctl shutdown [poweroff|reboot|halt]` — System shutdown
+```
+dynamodctl list              # List all services with status
+dynamodctl start <name>      # Start a service
+dynamodctl stop <name>       # Stop a service
+dynamodctl restart <name>    # Restart a service
+dynamodctl status <name>     # Show service details
+dynamodctl tree              # Display the supervisor tree
+dynamodctl shutdown <mode>   # poweroff, reboot, or halt
+```
 
 ### dynamod-logd (Rust)
 
-Log collection daemon. Accepts log streams from services, stores them
-in rotating log files under `/var/log/dynamod/`, and maintains an
-in-memory ring buffer for fast queries.
+Log collection daemon. Accepts log streams from services, stores them in
+rotating log files under `/var/log/dynamod/`, and maintains an in-memory
+ring buffer for fast queries.
 
-## IPC Protocol
+### systemd-mimic layer
+
+Four components that implement systemd's frontend D-Bus APIs so that desktop
+environments, Wayland compositors, and common Linux tools work without
+modification. All are clean-room implementations based on freedesktop.org
+specs — no systemd source code, MIT licensed.
+
+| Component | Bus Name | Key Features |
+|-----------|----------|-------------|
+| **dynamod-logind** | `org.freedesktop.login1` | Session/seat/user management, `TakeControl`/`TakeDevice` for Wayland GPU access, power management, inhibitor locks, VT switching |
+| **dynamod-sd1bridge** | `org.freedesktop.systemd1` | Translates `StartUnit`/`StopUnit`/`ListUnits` to dynamod's native IPC; makes `systemctl` work |
+| **dynamod-hostnamed** | `hostname1`, `timedate1`, `locale1` | System identification for GNOME Settings panels |
+| **dynamod-sdnotify** | — | Drop-in `libsystemd.so.0` providing `sd_notify()`, `sd_listen_fds()`, `sd_booted()`, `sd_journal_print()`, `sd_pid_get_session()` |
+
+Verified working with **sway** (Wayland compositor via seatd) and
+**GNOME Shell 47** (Mutter acquiring GPU via logind's TakeDevice).
+
+## Boot sequence
+
+### Phase A: Initramfs (when `root=` is on the cmdline)
+
+1. Kernel unpacks initramfs, executes `dynamod-init` as PID 1
+2. Mount `/proc`, `/sys`, `/dev` (3 pseudo-filesystems)
+3. Read `/proc/cmdline`, extract `root=`, `rootfstype=`, `rootflags=`, `rootwait`
+4. Run `mdev -s` to create device nodes (needed for UUID/LABEL resolution)
+5. Resolve root device:
+   - `/dev/sda1` → use directly
+   - `UUID=xxxx` → scan `/dev/disk/by-uuid/`
+   - `PARTUUID=xxxx` → scan `/dev/disk/by-partuuid/`
+   - `LABEL=xxxx` → scan `/dev/disk/by-label/`
+6. Wait for device if `rootwait` is set (poll every 250ms, max 30s)
+7. Mount root device on `/newroot` (read-only by default)
+8. Move `/proc`, `/sys`, `/dev` to `/newroot/proc`, `/newroot/sys`, `/newroot/dev`
+9. Delete initramfs contents (recursive, skip mount points) to free RAM
+10. `chdir("/newroot")` → `mount(".", "/", MS_MOVE)` → `chroot(".")` → `chdir("/")`
+11. `execve("/sbin/dynamod-init")` — re-exec from the real rootfs
+
+### Phase B: Real root
+
+1. Mount remaining pseudo-filesystems: `/dev/pts`, `/dev/shm`, `/run`, `/sys/fs/cgroup`
+   (already-mounted paths from Phase A return EBUSY, which is silently ignored)
+2. Create `/run/dynamod/` runtime directory
+3. Set hostname from `/etc/hostname`
+4. Seed kernel entropy from `/var/lib/dynamod/random-seed`
+5. Generate `/etc/machine-id` if missing (32 hex chars from `/dev/urandom`)
+6. Set up signal handling via `signalfd`
+7. Create socketpair, `fork`/`exec` dynamod-svmgr, pass one end via `DYNAMOD_INIT_FD`
+8. Enter `epoll` event loop: signals, svmgr pidfd, IPC socket
+
+### Phase C: Service startup (in dynamod-svmgr)
+
+1. Load all `*.toml` from `/etc/dynamod/services/` and `/etc/dynamod/supervisors/`
+2. Validate configs (no cycles, cross-references check)
+3. Initialize cgroup v2 hierarchy at `/sys/fs/cgroup/dynamod/`
+4. Bind control socket at `/run/dynamod/control.sock`
+5. Build dependency graph, compute initial frontier
+6. Start all services with zero unmet dependencies in parallel
+7. As services become ready, decrement unmet counts for dependents
+8. If a service fails, block all transitive `requires` dependents
+9. Log startup summary: "N ready, M blocked"
+
+Typical boot on a disk-based system:
+
+```
+fsck → remount-root-rw → fstab-mount → (bootmisc, hostname, sysctl, network, modules-load)
+  → syslog → dynamod-logd → mdev-coldplug → (getty, dbus → logind → sd1bridge → hostnamed)
+```
+
+## Shutdown sequence
+
+1. Svmgr computes reverse topological order (dependents stop first)
+2. For each service: run `stop-exec` if configured, else send `stop-signal`
+   (default SIGTERM), wait `stop-timeout` (default 10s), SIGKILL if still alive
+3. Clean up cgroup for each stopped service
+4. Svmgr sends `RequestShutdown` to init, then exits
+5. Init sends SIGTERM to all remaining processes, waits 5s reaping zombies
+6. Init sends SIGKILL to remaining processes, waits 2s
+7. Save random seed to `/var/lib/dynamod/random-seed`
+8. `sync()` all filesystems
+9. Read `/proc/mounts`, unmount everything in reverse order (falls back to
+   hardcoded list if `/proc/mounts` is unreadable)
+10. Remount `/` read-only
+11. Final `sync()`, then `reboot(2)` syscall (poweroff/reboot/halt)
+
+## IPC protocol
 
 All inter-component communication uses length-prefixed MessagePack over
 Unix domain sockets (SOCK_STREAM).
 
 ```
-[magic: 0x444D (2B)] [length: u32 LE (4B)] [payload: MessagePack (N B)]
+┌──────────┬──────────────┬─────────────────────┐
+│ magic    │ length       │ payload              │
+│ 0x44 0x4D│ u32 LE (4B) │ MessagePack (N bytes)│
+│ "DM"     │              │                      │
+└──────────┴──────────────┴─────────────────────┘
 ```
 
-- **Magic:** `0x44 0x4D` ("DM") for quick validation
-- **Max message:** 64 KiB
-- **Serialization:** MessagePack via `rmp-serde` (Rust) and a minimal
-  hand-written decoder (Zig, ~270 lines)
+- **Magic**: `0x44 0x4D` ("DM") for quick validation and resync
+- **Max payload**: 64 KiB
+- **Serialization**: `rmp-serde` with `struct_as_map()` on the Rust side
+  (string keys), hand-written minimal decoder on the Zig side (~300 lines)
 
 ### Channels
 
-| Channel | Transport | Purpose |
-|---------|-----------|---------|
-| init ↔ svmgr | socketpair (created before fork) | Heartbeat, shutdown requests |
-| svmgr ↔ dynamodctl | `/run/dynamod/control.sock` | Start/stop/status/tree commands |
+| Channel | Transport | Messages |
+|---------|-----------|----------|
+| init ↔ svmgr | socketpair (pre-fork) | Heartbeat, HeartbeatAck, RequestShutdown, ShutdownSignal, LogToKmsg |
+| svmgr ↔ dynamodctl | `/run/dynamod/control.sock` | StartService, StopService, RestartService, ServiceStatus, ListServices, TreeStatus, Reload, Shutdown, GetServiceByPid |
 
-## Supervisor Trees
+## Supervisor trees
 
-Dynamod implements OTP-style supervisor trees from Erlang/OTP.
+Inspired by Erlang/OTP. Services are organized into a tree of supervisors,
+each with its own restart strategy and intensity limits.
 
-### Restart Strategies
+### Restart strategies
 
-- **one-for-one:** Only the failed child is restarted
-- **one-for-all:** All children are stopped (reverse order) and restarted (start order)
-- **rest-for-one:** The failed child and all children started after it are restarted
+- **one-for-one**: Only the failed child is restarted. Good for independent services.
+- **one-for-all**: All children stop (reverse order) then restart (start order).
+  Use when children are tightly coupled.
+- **rest-for-one**: The failed child and all children started after it are restarted.
+  Use when later children depend on earlier ones.
 
-### Restart Intensity
+### Restart intensity
 
-Each supervisor tracks restarts in a time window (ring buffer of timestamps).
-If `max_restarts` is exceeded within `max_restart_window`, the supervisor
-itself fails and the failure escalates to its parent supervisor.
+Each supervisor tracks restart timestamps in a sliding window. If
+`max_restarts` is exceeded within `max_restart_window`, the supervisor
+itself fails and the failure escalates to its parent.
 
-### Restart Policies
+For example, with `max-restarts = 5` and `max-restart-window = "60s"`:
+if a child crashes 6 times in one minute, the supervisor gives up and
+escalates to its parent.
 
-Per-service:
-- **permanent:** Always restart, regardless of exit reason
-- **transient:** Restart only on abnormal exit (non-zero code or signal)
-- **temporary:** Never restart
+### Per-service restart policies
 
-## Dependency Resolution
+- **permanent**: Always restart, no matter how it exited
+- **transient**: Restart only on abnormal exit (non-zero code or signal)
+- **temporary**: Never restart (for oneshot tasks)
 
-Services declare dependencies via `requires`, `wants`, `after`, and `before`.
+## Dependency resolution
 
-### Dynamic Frontier Algorithm
+Services declare ordering and hard/soft dependencies:
 
-Instead of computing a single topological order, dynamod maintains a
-frontier of services whose dependencies are all satisfied:
+- `requires = ["network"]` — hard dependency: if network fails, this service is blocked
+- `wants = ["syslog"]` — soft dependency: ordering hint, but won't block if absent
+- `after = ["bootmisc"]` — pure ordering: start after bootmisc, no failure propagation
+- `before = ["nginx"]` — reverse ordering: ensure this starts before nginx
+
+### Dynamic frontier algorithm
+
+Instead of computing a single topological order upfront, dynamod maintains
+a live frontier of services whose dependencies are all satisfied:
 
 1. Compute `unmet[s]` = count of unready dependencies for each service
 2. Start all services with `unmet == 0` in parallel
-3. When a service becomes READY, decrement `unmet` for all its dependents
+3. When a service becomes READY: decrement `unmet` for all its dependents;
+   if any reach zero, add them to the frontier
 4. When a service FAILS: block all transitive `requires` dependents;
    `after`-only dependents can still start
 
-This maximizes startup parallelism — e.g., in a diamond dependency
-(A → B, A → C, B+C → D), B and C start simultaneously after A is ready.
+This maximizes parallelism. In a diamond dependency (A → B, A → C, B+C → D),
+B and C start simultaneously after A is ready.
 
-### Cycle Detection
+Cycles are detected via DFS with three-color marking before startup.
+If found, dynamod logs the exact cycle path and refuses to start.
 
-Uses DFS with three-color marking. If cycles are detected at boot,
-dynamod refuses to start and logs the exact cycle path.
-
-## Resource Isolation
+## Resource isolation
 
 ### Cgroups v2
 
-Each service gets its own cgroup under `/sys/fs/cgroup/dynamod/<service>/`.
+Each service gets its own cgroup at `/sys/fs/cgroup/dynamod/<service>/`.
 Configurable limits:
-- `memory.max` / `memory.high` — hard and soft memory limits
-- `cpu.weight` / `cpu.max` — CPU scheduling weight and bandwidth
-- `pids.max` — maximum number of processes
+
+- `memory.max` / `memory.high` — hard OOM limit and soft reclaim pressure
+- `cpu.weight` / `cpu.max` — scheduling weight and bandwidth
+- `pids.max` — process count limit
 - `io.weight` — I/O scheduling weight
 
 OOM kills are detected by polling `memory.events`.
 
-### Linux Namespaces
+### Linux namespaces
 
-Per-service namespace isolation configured in TOML:
-- **pid:** Isolated PID namespace (service sees itself as PID 1)
-- **mnt:** Private mount namespace with optional read-only root, private `/tmp`, bind mounts
-- **net:** Network namespace isolation
-- **uts/ipc/user/cgroup:** Additional namespace types
+Per-service isolation via `unshare(2)`:
 
-## Boot Sequence
-
-1. Kernel executes `dynamod-init` as PID 1
-2. Init mounts `/proc`, `/sys`, `/dev`, `/run`, `/sys/fs/cgroup`
-3. Init creates socketpair, fork/execs `dynamod-svmgr`
-4. Init enters epoll loop (signalfd + pidfd + IPC socket)
-5. Svmgr loads config, validates dependency DAG (no cycles)
-6. Svmgr initializes cgroup hierarchy
-7. Svmgr runs dynamic frontier: starts services as deps become ready
-8. Services signal readiness; dependents start when all deps satisfied
-
-## Shutdown Sequence
-
-1. Svmgr computes reverse topological order (dependents first)
-2. For each service: send configured stop-signal, wait stop-timeout, SIGKILL if needed
-3. Clean up cgroups for each stopped service
-4. Svmgr sends `RequestShutdown` to init, then exits
-5. Init sends SIGTERM to all remaining processes, waits 5s, SIGKILL
-6. Init saves random seed, syncs filesystems
-7. Init unmounts all pseudo-filesystems, remounts `/` read-only
-8. Init calls `reboot(2)` (poweroff/reboot/halt)
+- **pid**: isolated PID namespace (service sees itself as PID 1)
+- **mnt**: private mount namespace with optional read-only root, private `/tmp`, bind mounts
+- **net**: network namespace isolation
+- **uts**: separate hostname
+- **ipc**: isolated System V IPC
+- **user**: user namespace mapping
+- **cgroup**: isolated cgroup view
