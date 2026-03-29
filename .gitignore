@@ -1,0 +1,20 @@
+# Zig
+zig/zig-out/
+zig/.zig-cache/
+
+# Rust
+rust/target/
+
+# QEMU test artifacts
+test/qemu/build/
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,7 @@
+[supervisor]
+name = "root"
+strategy = "one-for-one"
+
+[restart]
+max-restarts = 20
+max-restart-window = "600s"

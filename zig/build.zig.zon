@@ -1,0 +1,12 @@
+.{
+    .name = .dynamod_init,
+    .version = "0.1.0",
+    .fingerprint = 0xa9defb12511022df,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

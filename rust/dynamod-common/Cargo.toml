@@ -1,0 +1,9 @@
+[package]
+name = "dynamod-common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+rmp-serde = { workspace = true }
+thiserror = { workspace = true }

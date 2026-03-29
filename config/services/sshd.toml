@@ -1,0 +1,31 @@
+[service]
+name = "sshd"
+exec = ["/usr/sbin/sshd", "-D", "-e"]
+type = "simple"
+
+[service.user]
+user = "root"
+group = "root"
+
+[restart]
+policy = "permanent"
+delay = "1s"
+max-restarts = 10
+max-restart-window = "60s"
+
+[readiness]
+type = "tcp-port"
+port = 22
+timeout = "15s"
+
+[dependencies]
+requires = ["network"]
+after = ["syslog"]
+
+[cgroup]
+memory-max = "256M"
+pids-max = 128
+
+[shutdown]
+stop-signal = "SIGTERM"
+stop-timeout = "10s"

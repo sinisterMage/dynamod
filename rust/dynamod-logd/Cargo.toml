@@ -1,0 +1,9 @@
+[package]
+name = "dynamod-logd"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nix = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

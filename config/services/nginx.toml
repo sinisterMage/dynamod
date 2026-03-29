@@ -1,0 +1,36 @@
+[service]
+name = "nginx"
+exec = ["/usr/sbin/nginx", "-g", "daemon off;"]
+type = "simple"
+
+[service.user]
+user = "root"
+group = "root"
+
+[restart]
+policy = "permanent"
+delay = "2s"
+max-restarts = 5
+max-restart-window = "60s"
+
+[readiness]
+type = "tcp-port"
+port = 80
+timeout = "30s"
+
+[dependencies]
+requires = ["network"]
+wants = ["syslog"]
+
+[cgroup]
+memory-max = "512M"
+cpu-weight = 200
+pids-max = 256
+
+[namespace]
+enable = ["pid"]
+private-tmp = true
+
+[shutdown]
+stop-signal = "SIGQUIT"
+stop-timeout = "30s"

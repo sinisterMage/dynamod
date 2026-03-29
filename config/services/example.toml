@@ -1,0 +1,51 @@
+# Example dynamod service configuration.
+# Copy this file to /etc/dynamod/services/<name>.toml and customize.
+
+[service]
+name = "example"
+# Supervisor this service belongs to (default: "root")
+supervisor = "root"
+# Command to execute (first element is the binary, rest are args)
+exec = ["/usr/bin/echo", "hello from dynamod"]
+# Service type: "simple", "oneshot", "forking", "notify"
+type = "oneshot"
+
+# [service.user]
+# user = "nobody"
+# group = "nogroup"
+
+[restart]
+# Restart policy: "permanent" (always), "transient" (on failure), "temporary" (never)
+policy = "temporary"
+# Delay before restart
+delay = "1s"
+# Max restarts within the window before the supervisor gives up
+max-restarts = 5
+max-restart-window = "60s"
+
+[readiness]
+# Readiness type: "none", "notify", "tcp-port", "exec", "fd"
+type = "none"
+timeout = "30s"
+
+[dependencies]
+# Services that must be READY before this one starts
+requires = []
+# Optional dependencies (ordering only if present)
+wants = []
+# Start after these services (ordering, not hard dependency)
+after = []
+
+# [cgroup]
+# memory-max = "512M"
+# cpu-weight = 100
+# pids-max = 64
+
+# [namespace]
+# enable = ["pid", "mnt"]
+# private-tmp = true
+# protect-system = "strict"
+
+[shutdown]
+stop-signal = "SIGTERM"
+stop-timeout = "10s"

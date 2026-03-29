@@ -1,0 +1,45 @@
+[service]
+name = "postgresql"
+exec = ["/usr/bin/postgres", "-D", "/var/lib/postgresql/data"]
+workdir = "/var/lib/postgresql"
+type = "simple"
+environment = { PGDATA = "/var/lib/postgresql/data", LC_ALL = "C.UTF-8" }
+
+[service.user]
+user = "postgres"
+group = "postgres"
+
+[restart]
+policy = "permanent"
+delay = "3s"
+max-restarts = 5
+max-restart-window = "120s"
+
+[readiness]
+type = "tcp-port"
+port = 5432
+timeout = "45s"
+
+[dependencies]
+requires = ["network"]
+wants = ["syslog"]
+
+[cgroup]
+memory-max = "2G"
+memory-high = "1536M"
+cpu-weight = 200
+pids-max = 256
+
+[namespace]
+enable = ["pid", "mnt"]
+private-tmp = true
+protect-system = "strict"
+bind-mounts = [
+    { source = "/var/lib/postgresql", target = "/var/lib/postgresql", writable = true },
+    { source = "/etc/ssl", target = "/etc/ssl", writable = false },
+    { source = "/run/postgresql", target = "/run/postgresql", writable = true },
+]
+
+[shutdown]
+stop-signal = "SIGTERM"
+stop-timeout = "30s"

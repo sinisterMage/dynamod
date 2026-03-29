@@ -1,0 +1,10 @@
+[package]
+name = "dynamodctl"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dynamod-common = { path = "../dynamod-common" }
+clap = { workspace = true }
+serde = { workspace = true }
+rmp-serde = { workspace = true }

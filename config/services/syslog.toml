@@ -1,0 +1,23 @@
+[service]
+name = "syslog"
+exec = ["/usr/sbin/rsyslogd", "-n"]
+type = "simple"
+
+[restart]
+policy = "permanent"
+delay = "1s"
+
+[readiness]
+type = "none"
+timeout = "10s"
+
+[dependencies]
+after = ["network"]
+
+[cgroup]
+memory-max = "128M"
+pids-max = 16
+
+[shutdown]
+stop-signal = "SIGTERM"
+stop-timeout = "5s"
