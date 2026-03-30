@@ -4,7 +4,7 @@
 EAPI=8
 
 DESCRIPTION="Zig+Rust PID 1 init system with OTP supervisor trees and systemd compatibility"
-HOMEPAGE="https://github.com/user/dynamod"
+HOMEPAGE="https://github.com/sinisterMage/dynamod"
 
 # For local install, place the repo at /var/tmp/portage/sys-apps/dynamod-0.1.0/work/dynamod
 # or use a local overlay with SRC_URI=""

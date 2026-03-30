@@ -15,7 +15,7 @@ everything you need to get started.
 ### Building
 
 ```sh
-git clone https://github.com/user/dynamod.git
+git clone https://github.com/sinisterMage/dynamod.git
 cd dynamod
 make          # Builds both Zig and Rust components
 make test     # Runs unit tests

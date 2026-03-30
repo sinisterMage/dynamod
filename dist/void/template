@@ -9,7 +9,7 @@ revision=1
 short_desc="Zig+Rust PID 1 init system with OTP supervisor trees"
 maintainer="Ofek Bickel"
 license="MIT"
-homepage="https://github.com/user/dynamod"
+homepage="https://github.com/sinisterMage/dynamod"
 
 hostmakedepends="zig rust cargo"
 makedepends="musl-devel"

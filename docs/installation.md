@@ -25,7 +25,7 @@ Optional for testing:
 ### Building
 
 ```sh
-git clone https://github.com/user/dynamod.git
+git clone https://github.com/sinisterMage/dynamod.git
 cd dynamod
 make
 ```
