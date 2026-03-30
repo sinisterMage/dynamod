@@ -1,0 +1,73 @@
+# Template file for xbps-src
+# Maintainer: Ofek Bickel
+# Local template — not published to void-packages yet.
+# Build with: xbps-src pkg dynamod
+
+pkgname=dynamod
+version=0.1.0
+revision=1
+short_desc="Zig+Rust PID 1 init system with OTP supervisor trees"
+maintainer="Ofek Bickel"
+license="MIT"
+homepage="https://github.com/user/dynamod"
+
+hostmakedepends="zig rust cargo"
+makedepends="musl-devel"
+depends="dbus"
+
+# For local builds, symlink the repo to srcpkgs/dynamod/files/
+# or set distfiles to a local path
+do_build() {
+	cd zig && zig build -Doptimize=ReleaseSafe
+	cd "${wrksrc}/rust" && cargo build --release
+}
+
+do_check() {
+	cd zig && zig build test
+	cd "${wrksrc}/rust" && cargo test --workspace
+}
+
+do_install() {
+	local _zigout="zig/zig-out/bin"
+	local _rustout="rust/target/x86_64-unknown-linux-musl/release"
+
+	# Core binaries
+	vbin "${_zigout}/dynamod-init"
+	vmkdir usr/lib/dynamod
+	vinstall "${_rustout}/dynamod-svmgr" 755 usr/lib/dynamod
+	vinstall "${_rustout}/dynamod-logd"  755 usr/lib/dynamod
+	vbin "${_rustout}/dynamodctl"
+
+	# systemd-mimic binaries
+	for bin in dynamod-logind dynamod-sd1bridge dynamod-hostnamed; do
+		[ -f "${_rustout}/${bin}" ] && vinstall "${_rustout}/${bin}" 755 usr/lib/dynamod
+	done
+
+	# Supervisor configs
+	vmkdir etc/dynamod/supervisors
+	for f in config/supervisors/*.toml; do
+		vinstall "$f" 644 etc/dynamod/supervisors
+	done
+
+	# Service configs
+	vmkdir etc/dynamod/services
+	for f in config/services/*.toml; do
+		vinstall "$f" 644 etc/dynamod/services
+	done
+
+	# D-Bus policy files
+	vmkdir usr/share/dbus-1/system.d
+	for f in config/dbus-1/*.conf; do
+		vinstall "$f" 644 usr/share/dbus-1/system.d
+	done
+
+	# Runtime dirs
+	vmkdir var/lib/dynamod
+	vmkdir var/log/dynamod
+
+	# Docs
+	vdoc README.md
+	vdoc docs/architecture.md
+	vdoc docs/configuration.md
+	vlicense LICENSE
+}

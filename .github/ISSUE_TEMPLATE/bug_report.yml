@@ -1,0 +1,70 @@
+name: Bug Report
+description: Report something that isn't working correctly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill in the relevant sections below.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug.
+      placeholder: Describe what you expected vs. what actually happened.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Boot with `root=/dev/sda1 rootwait ...`
+        2. Start service X
+        3. See error in kernel log
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste any relevant output (kernel log, svmgr output, etc.)
+      render: text
+    validations:
+      required: false
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of dynamod is affected?
+      options:
+        - dynamod-init (PID 1 / boot / shutdown)
+        - dynamod-svmgr (service manager)
+        - dynamodctl (CLI tool)
+        - dynamod-logind (login1 D-Bus)
+        - dynamod-sd1bridge (systemd1 D-Bus)
+        - dynamod-hostnamed (hostname1/timedate1/locale1)
+        - dynamod-sdnotify (libsystemd shim)
+        - Configuration / TOML parsing
+        - Build system / packaging
+        - Documentation
+        - Other
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Kernel version, distro, hardware/VM, etc.
+      placeholder: |
+        - Kernel: 6.19.10
+        - Distro: Alpine 3.21 (in QEMU)
+        - Architecture: x86_64
+    validations:
+      required: false

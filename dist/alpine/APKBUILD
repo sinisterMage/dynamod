@@ -1,0 +1,69 @@
+# Maintainer: Ofek Bickel
+# Local APKBUILD for dynamod — not published to Alpine repos yet.
+# Build with: abuild -r
+
+pkgname=dynamod
+pkgver=0.1.0
+pkgrel=0
+pkgdesc="Zig+Rust PID 1 init system with OTP supervisor trees and systemd compatibility"
+url="https://github.com/user/dynamod"
+arch="x86_64"
+license="MIT"
+depends="dbus"
+makedepends="zig rust cargo musl-dev"
+subpackages="$pkgname-doc"
+options="!check"  # tests require QEMU
+
+# For local builds, set this to the repo root
+_srcdir="${startdir}/../.."
+
+build() {
+    cd "$_srcdir"
+    cd zig && zig build -Doptimize=ReleaseSafe
+    cd ../rust && cargo build --release
+}
+
+package() {
+    cd "$_srcdir"
+
+    local _zigout="zig/zig-out/bin"
+    local _rustout="rust/target/x86_64-unknown-linux-musl/release"
+
+    # Core binaries
+    install -Dm755 "$_zigout/dynamod-init"        "$pkgdir/usr/sbin/dynamod-init"
+    install -Dm755 "$_rustout/dynamod-svmgr"      "$pkgdir/usr/lib/dynamod/dynamod-svmgr"
+    install -Dm755 "$_rustout/dynamodctl"          "$pkgdir/usr/bin/dynamodctl"
+    install -Dm755 "$_rustout/dynamod-logd"        "$pkgdir/usr/lib/dynamod/dynamod-logd"
+
+    # systemd-mimic binaries
+    for bin in dynamod-logind dynamod-sd1bridge dynamod-hostnamed; do
+        [ -f "$_rustout/$bin" ] && install -Dm755 "$_rustout/$bin" "$pkgdir/usr/lib/dynamod/$bin"
+    done
+
+    # Configs
+    install -Dm644 config/supervisors/root.toml       "$pkgdir/etc/dynamod/supervisors/root.toml"
+    install -Dm644 config/supervisors/early-boot.toml "$pkgdir/etc/dynamod/supervisors/early-boot.toml"
+    install -Dm644 config/supervisors/desktop.toml    "$pkgdir/etc/dynamod/supervisors/desktop.toml"
+
+    install -dm755 "$pkgdir/etc/dynamod/services"
+    for f in config/services/*.toml; do
+        install -Dm644 "$f" "$pkgdir/etc/dynamod/services/$(basename "$f")"
+    done
+
+    # D-Bus policy files
+    install -dm755 "$pkgdir/usr/share/dbus-1/system.d"
+    for f in config/dbus-1/*.conf; do
+        install -Dm644 "$f" "$pkgdir/usr/share/dbus-1/system.d/$(basename "$f")"
+    done
+
+    # Runtime dirs
+    install -dm755 "$pkgdir/var/lib/dynamod"
+    install -dm755 "$pkgdir/var/log/dynamod"
+}
+
+doc() {
+    install -Dm644 "$_srcdir/README.md"              "$subpkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 "$_srcdir/docs/architecture.md"   "$subpkgdir/usr/share/doc/$pkgname/architecture.md"
+    install -Dm644 "$_srcdir/docs/configuration.md"  "$subpkgdir/usr/share/doc/$pkgname/configuration.md"
+    install -Dm644 "$_srcdir/LICENSE"                 "$subpkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

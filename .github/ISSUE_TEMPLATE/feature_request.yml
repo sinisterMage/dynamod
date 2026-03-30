@@ -1,0 +1,43 @@
+name: Feature Request
+description: Suggest a new feature or improvement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have an idea for dynamod? We'd love to hear it.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What would you like?
+      description: Describe the feature or improvement.
+      placeholder: A clear description of what you want and why.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Have you thought about other ways to solve this?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of dynamod would this affect?
+      options:
+        - dynamod-init (PID 1 / boot / shutdown)
+        - dynamod-svmgr (service manager)
+        - dynamodctl (CLI tool)
+        - systemd-mimic (D-Bus interfaces)
+        - Configuration / TOML schema
+        - Build system / packaging
+        - Testing
+        - Documentation
+        - New component
+    validations:
+      required: false

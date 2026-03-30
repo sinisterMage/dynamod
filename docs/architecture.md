@@ -51,8 +51,8 @@ kernel
 
 ### dynamod-init (Zig)
 
-The PID 1 process. Intentionally minimal (~800 lines of Zig) to minimize
-the chance of a crash that would bring down the system.
+The PID 1 process. Intentionally minimal (~2300 lines of Zig across 14 files)
+to minimize the chance of a crash that would bring down the system.
 
 **What it does:**
 

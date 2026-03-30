@@ -33,7 +33,7 @@ dynamod has three layers:
 
 | Component | Language | What it does |
 |-----------|----------|-------------|
-| **dynamod-init** | Zig | PID 1. Mounts filesystems, handles initramfs-to-rootfs transition, reaps zombies, manages shutdown. ~800 lines, no heap allocations, can't crash. |
+| **dynamod-init** | Zig | PID 1. Mounts filesystems, handles initramfs-to-rootfs transition, reaps zombies, manages shutdown. ~2300 lines across 14 files, no heap allocations, can't crash. |
 | **dynamod-svmgr** | Rust | The service manager. Reads TOML configs, builds a dependency graph, starts services in parallel, supervises them with OTP-style restart strategies, and enforces resource limits via cgroups v2. |
 | **dynamodctl** | Rust | CLI tool. `dynamodctl start nginx`, `dynamodctl tree`, `dynamodctl shutdown reboot`. |
 
@@ -168,15 +168,18 @@ for the full reference.
 
 ## Documentation
 
+- [Installation Guide](docs/installation.md) — building, packaging, kernel requirements,
+  setting up dynamod as your init system
 - [Architecture](docs/architecture.md) — how the system works, boot sequence,
   IPC protocol, supervisor trees, systemd-mimic layer
 - [Configuration](docs/configuration.md) — every TOML field with defaults and examples
+- [Contributing](CONTRIBUTING.md) — how to contribute, code style, testing
 
 ## Project structure
 
 ```
 dynamod/
-├── zig/src/               # PID 1 init (Zig, ~800 lines)
+├── zig/src/               # PID 1 init (Zig, ~2300 lines)
 │   ├── main.zig           # Entry point, two-phase boot detection
 │   ├── boot.zig           # Mount filesystems, hostname, entropy, machine-id
 │   ├── cmdline.zig        # Kernel command line parser
