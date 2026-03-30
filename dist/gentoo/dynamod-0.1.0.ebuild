@@ -24,7 +24,7 @@ RDEPEND="
 "
 
 src_compile() {
-	cd zig && zig build -Doptimize=ReleaseSafe || die "Zig build failed"
+	cd zig && zig build || die "Zig build failed"
 	cd "${S}/rust" && cargo build --release || die "Rust build failed"
 }
 

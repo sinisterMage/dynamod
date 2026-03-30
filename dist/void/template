@@ -18,7 +18,7 @@ depends="dbus"
 # For local builds, symlink the repo to srcpkgs/dynamod/files/
 # or set distfiles to a local path
 do_build() {
-	cd zig && zig build -Doptimize=ReleaseSafe
+	cd zig && zig build
 	cd "${wrksrc}/rust" && cargo build --release
 }
 

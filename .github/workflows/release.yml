@@ -28,7 +28,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build Zig
-        run: cd zig && zig build -Doptimize=ReleaseSafe
+        run: cd zig && zig build
 
       - name: Build Rust
         run: cd rust && cargo build --release

@@ -19,7 +19,7 @@ _srcdir="${startdir}/../.."
 
 build() {
     cd "$_srcdir"
-    cd zig && zig build -Doptimize=ReleaseSafe
+    cd zig && zig build
     cd ../rust && cargo build --release
 }
 
