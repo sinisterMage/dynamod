@@ -1,4 +1,4 @@
-.PHONY: all zig rust rust-sdnotify clean install install-alpine test test-zig test-rust test-qemu test-alpine test-dbus fmt
+.PHONY: all zig rust rust-sdnotify clean install install-alpine test test-zig test-rust test-qemu test-alpine test-dbus test-void fmt
 
 DESTDIR ?=
 PREFIX  ?= /usr
@@ -70,6 +70,9 @@ test-dbus: all
 
 test-disk: all
 	test/alpine/boot-disk.sh
+
+test-void: all
+	test/void/boot-full.sh
 
 fmt:
 	cd rust && cargo fmt --all

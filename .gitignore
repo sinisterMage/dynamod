@@ -14,6 +14,8 @@ test/alpine/build-dbus
 test/alpine/build-wayland
 test/alpine/build-gnome
 test/alpine/build-disk
+test/void/build-full
+test/void/.cache/
 # Editor
 *.swp
 *.swo
