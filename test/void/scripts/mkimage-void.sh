@@ -488,8 +488,20 @@ echo "Installing GRUB bootloader..."
 # Install GRUB to the disk image (using host grub-install)
 "$GRUB_INSTALL" --target=i386-pc --boot-directory="$MNT/boot" "$LOOP"
 
+# grub2-install (Fedora/RHEL) uses boot/grub2/; Debian/Ubuntu grub-install uses boot/grub/.
+# Config must live next to the modules or GRUB drops to the interactive shell with no menu.
+if [ -d "$MNT/boot/grub2" ]; then
+    GRUB_CFG_PATH="$MNT/boot/grub2/grub.cfg"
+elif [ -d "$MNT/boot/grub" ]; then
+    GRUB_CFG_PATH="$MNT/boot/grub/grub.cfg"
+else
+    echo "ERROR: Neither boot/grub nor boot/grub2 after grub-install."
+    exit 1
+fi
+mkdir -p "$(dirname "$GRUB_CFG_PATH")"
+
 # Create GRUB configuration
-cat > "$MNT/boot/grub/grub.cfg" <<'GRUBCFG'
+cat > "$GRUB_CFG_PATH" <<'GRUBCFG'
 set timeout=0
 set default=0
 
