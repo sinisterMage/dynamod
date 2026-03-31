@@ -9,7 +9,7 @@ dynamod can run as the primary init system or be tested in a QEMU VM.
 
 | Tool | Version | What it's for |
 |------|---------|--------------|
-| Zig | 0.15+ | Building dynamod-init (PID 1) |
+| Zig | 0.15 | Building dynamod-init (PID 1) |
 | Rust | 2024 edition | Building service manager and tools |
 | musl target | — | Static linking (`rustup target add x86_64-unknown-linux-musl`) |
 | make | any | Build orchestration |
