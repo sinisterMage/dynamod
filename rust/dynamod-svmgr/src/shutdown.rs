@@ -186,34 +186,10 @@ fn finalize_stop(
 
 /// Compute reverse topological order (dependents before dependencies).
 /// Services with no dependents are stopped first; base services last.
+/// Uses forward Kahn's algorithm then reverses the result.
 fn compute_reverse_topo_order(graph: &DependencyGraph) -> Vec<String> {
     let all_services = graph.all_services();
-    let mut in_degree: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    let mut reverse_adj: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
 
-    // Build reverse graph: edges point from dependency -> dependent
-    // in_degree counts how many services depend on each service
-    for svc in all_services {
-        in_degree.entry(svc.as_str()).or_insert(0);
-        reverse_adj.entry(svc.as_str()).or_default();
-        for dep in graph.dependencies_of(svc) {
-            reverse_adj.entry(dep.as_str()).or_default().push(svc.as_str());
-            *in_degree.entry(svc.as_str()).or_insert(0) += 1;
-        }
-    }
-
-    // Kahn's algorithm on the reverse graph gives us: dependents first
-    // Actually we want to stop dependents FIRST, so we do a normal topo sort
-    // on the reverse graph.
-    // "in_degree" here counts: for each service, how many things it depends ON.
-    // Services with 0 in_degree depend on nothing -> they are "leaf" services.
-    // We want to stop leaf-dependent services first, base services last.
-
-    // Re-think: We want reverse dependency order.
-    // Forward topo order: A, B, C where A has no deps, B depends on A, C depends on B
-    // Reverse topo order for stopping: C, B, A (dependents first)
-
-    // So we compute forward topo and reverse it.
     let mut forward_in_degree: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for svc in all_services {
         forward_in_degree.insert(svc.as_str(), graph.dependencies_of(svc).len());

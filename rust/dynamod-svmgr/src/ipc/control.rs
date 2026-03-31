@@ -85,14 +85,26 @@ fn handle_connection(
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
 
-    // Read request
-    let mut buf = vec![0u8; 65536];
-    let n = stream.read(&mut buf)?;
-    if n == 0 {
-        return Ok(None);
+    // Read until we have a complete framed message (kernel may split writes)
+    let mut buf = vec![0u8; protocol::HEADER_SIZE + protocol::MAX_MESSAGE_SIZE as usize];
+    let mut filled = 0;
+    loop {
+        let n = stream.read(&mut buf[filled..])?;
+        if n == 0 {
+            if filled == 0 {
+                return Ok(None);
+            }
+            return Err("connection closed before complete message".into());
+        }
+        filled += n;
+        match protocol::decode(&buf[..filled]) {
+            Ok(_) => break,
+            Err(protocol::DecodeError::Incomplete) => continue,
+            Err(e) => return Err(e.into()),
+        }
     }
 
-    let (msg, _) = protocol::decode(&buf[..n])?;
+    let (msg, _) = protocol::decode(&buf[..filled])?;
     let (response_body, action) = handle_request(msg.body, tree);
 
     // Send response

@@ -265,6 +265,8 @@ fn main() {
     // Main event loop
     let heartbeat_interval = Duration::from_secs(5);
     let mut last_heartbeat = Instant::now();
+    let mut heartbeat_failures: u32 = 0;
+    const MAX_HEARTBEAT_FAILURES: u32 = 3;
 
     loop {
         // Reap exited children and apply supervisor strategies
@@ -281,9 +283,26 @@ fn main() {
                         stop_worker(&mut tree, &name);
                     }
                     ipc::control::ControlAction::RestartService(name) => {
+                        let old_pid = tree.get_worker(&name).and_then(|w| w.pid);
                         stop_worker(&mut tree, &name);
-                        std::thread::sleep(Duration::from_millis(200));
-                        reap_and_handle_exits(&mut tree, &cgroup_hierarchy, &mut cgroup_monitor);
+
+                        // Wait for the old process to actually exit (up to 5s)
+                        if let Some(pid) = old_pid {
+                            let deadline = Instant::now() + Duration::from_secs(5);
+                            loop {
+                                reap_and_handle_exits(
+                                    &mut tree, &cgroup_hierarchy, &mut cgroup_monitor,
+                                );
+                                let still_running = tree
+                                    .get_worker(&name)
+                                    .is_some_and(|w| w.pid == Some(pid));
+                                if !still_running || Instant::now() >= deadline {
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(50));
+                            }
+                        }
+
                         start_worker(&mut tree, &name, &cgroup_hierarchy, &mut cgroup_monitor);
                     }
                     ipc::control::ControlAction::Reload => {
@@ -351,8 +370,16 @@ fn main() {
         if last_heartbeat.elapsed() >= heartbeat_interval {
             if let Some(ref mut ch) = init_channel {
                 if let Err(e) = ch.send_heartbeat() {
-                    tracing::error!("heartbeat failed: {e}");
-                    break;
+                    heartbeat_failures += 1;
+                    tracing::error!(
+                        "heartbeat failed ({heartbeat_failures}/{MAX_HEARTBEAT_FAILURES}): {e}"
+                    );
+                    if heartbeat_failures >= MAX_HEARTBEAT_FAILURES {
+                        tracing::error!("init connection lost, exiting");
+                        break;
+                    }
+                } else {
+                    heartbeat_failures = 0;
                 }
             }
             last_heartbeat = Instant::now();
@@ -551,6 +578,7 @@ fn reap_oneshots_during_startup(
             }
             Ok(WaitStatus::StillAlive) => break,
             Err(nix::errno::Errno::ECHILD) => break,
+            Err(nix::errno::Errno::EINTR) => continue,
             _ => break,
         }
     }
@@ -580,6 +608,7 @@ fn reap_and_handle_exits(
             }
             Ok(WaitStatus::StillAlive) => break,
             Err(nix::errno::Errno::ECHILD) => break,
+            Err(nix::errno::Errno::EINTR) => continue,
             _ => break,
         }
     }

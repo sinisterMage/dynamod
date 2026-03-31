@@ -6,6 +6,9 @@ const linux = std.os.linux;
 const constants = @import("constants.zig");
 const msgpack = @import("msgpack.zig");
 const kmsg = @import("kmsg.zig");
+const shutdown_mod = @import("shutdown.zig");
+
+pub const ShutdownKind = shutdown_mod.ShutdownKind;
 
 const HEADER_SIZE = 6; // 2 magic + 4 length
 
@@ -22,29 +25,16 @@ pub const InitMessage = union(enum) {
     unknown,
 };
 
-pub const ShutdownKind = enum {
-    poweroff,
-    reboot,
-    halt,
-};
-
 /// Read buffer for accumulating partial messages.
 pub const ReadBuffer = struct {
     buf: [constants.max_message_size + HEADER_SIZE]u8 = undefined,
     len: usize = 0,
 
-    /// Attempt to read data from the fd and extract complete messages.
-    /// Calls the callback for each complete message found.
-    pub fn readAndProcess(
-        self: *ReadBuffer,
-        fd: std.posix.fd_t,
-        klog: ?kmsg,
-        callback: *const fn (InitMessage, ?kmsg) void,
-    ) !void {
-        // Read available data
+    /// Read available data from the fd into the buffer.
+    /// Returns error.EndOfStream on EOF, error.WouldBlock if nothing available.
+    pub fn readFrom(self: *ReadBuffer, fd: std.posix.fd_t) !void {
         const space = self.buf[self.len..];
         if (space.len == 0) {
-            // Buffer full with no valid message — reset
             self.len = 0;
             return;
         }
@@ -56,43 +46,41 @@ pub const ReadBuffer = struct {
 
         if (n == 0) return error.EndOfStream;
         self.len += n;
+    }
 
-        // Process complete messages
+    /// Extract and return the next complete message from the buffer.
+    /// Returns null if no complete message is available yet.
+    pub fn nextMessage(self: *ReadBuffer) ?InitMessage {
         while (self.len >= HEADER_SIZE) {
-            // Validate magic
             if (self.buf[0] != constants.ipc_magic[0] or self.buf[1] != constants.ipc_magic[1]) {
-                // Bad magic — try to resync by scanning forward
                 if (self.resync()) continue;
                 self.len = 0;
-                return;
+                return null;
             }
 
-            // Read payload length
             const payload_len = std.mem.readInt(u32, self.buf[2..6], .little);
             if (payload_len > constants.max_message_size) {
-                // Message too large — discard and resync
                 self.len = 0;
-                return;
+                return null;
             }
 
             const total = HEADER_SIZE + payload_len;
-            if (self.len < total) break; // Incomplete message
+            if (self.len < total) return null;
 
-            // Parse and dispatch the message
             const payload = self.buf[HEADER_SIZE..total];
             const msg = parseMessage(payload);
-            callback(msg, klog);
 
-            // Shift remaining data to front
             if (self.len > total) {
                 std.mem.copyForwards(u8, &self.buf, self.buf[total..self.len]);
             }
             self.len -= total;
+
+            return msg;
         }
+        return null;
     }
 
     fn resync(self: *ReadBuffer) bool {
-        // Scan for the next magic sequence
         var i: usize = 1;
         while (i + 1 < self.len) : (i += 1) {
             if (self.buf[i] == constants.ipc_magic[0] and self.buf[i + 1] == constants.ipc_magic[1]) {

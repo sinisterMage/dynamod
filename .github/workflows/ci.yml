@@ -1,14 +1,57 @@
-name: Release
+name: CI
 
 on:
   push:
-    tags:
-      - 'v*'
-
-permissions:
-  contents: write
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache Zig
+        uses: actions/cache@v4
+        with:
+          path: |
+            zig/zig-cache
+            zig/.zig-cache
+          key: ${{ runner.os }}-zig-${{ hashFiles('zig/build.zig', 'zig/build.zig.zon') }}
+          restore-keys: |
+            ${{ runner.os }}-zig-
+
+      - name: Zig tests
+        run: cd zig && zig build test
+
+      - name: Rust tests
+        run: cd rust && cargo test --workspace
+
   build:
     needs: [test]
     runs-on: ubuntu-latest
@@ -54,83 +97,3 @@ jobs:
 
       - name: Build Rust
         run: cd rust && cargo build --release
-
-      - name: Collect binaries
-        run: |
-          mkdir -p release
-          cp zig/zig-out/bin/dynamod-init release/
-          RUST_OUT=rust/target/x86_64-unknown-linux-musl/release
-          for bin in dynamod-svmgr dynamodctl dynamod-logd \
-                     dynamod-logind dynamod-sd1bridge dynamod-hostnamed; do
-            if [ ! -f "$RUST_OUT/$bin" ]; then
-              echo "ERROR: expected binary '$bin' not found in $RUST_OUT"
-              exit 1
-            fi
-            cp "$RUST_OUT/$bin" release/
-          done
-
-      - name: Create tarball
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          tar czf "dynamod-${VERSION}-x86_64-linux-musl.tar.gz" \
-            -C release .
-          # Also include configs and docs
-          tar czf "dynamod-${VERSION}-configs.tar.gz" \
-            config/ docs/ LICENSE README.md
-
-      - name: Generate checksums
-        run: |
-          sha256sum dynamod-*.tar.gz > SHA256SUMS
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            dynamod-*.tar.gz
-            SHA256SUMS
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Zig
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.15.2
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Cache Cargo registry and build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            rust/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Cache Zig
-        uses: actions/cache@v4
-        with:
-          path: |
-            zig/zig-cache
-            zig/.zig-cache
-          key: ${{ runner.os }}-zig-${{ hashFiles('zig/build.zig', 'zig/build.zig.zon') }}
-          restore-keys: |
-            ${{ runner.os }}-zig-
-
-      - name: Zig tests
-        run: cd zig && zig build test
-
-      - name: Rust tests
-        run: cd rust && cargo test --workspace

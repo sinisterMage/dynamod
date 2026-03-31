@@ -52,8 +52,11 @@ pub fn spawn_service(def: &ServiceDef) -> Result<SpawnedProcess, SpawnError> {
         .service
         .exec
         .iter()
-        .map(|a| CString::new(a.as_bytes()).unwrap_or_default())
-        .collect();
+        .map(|a| {
+            CString::new(a.as_bytes())
+                .map_err(|_| SpawnError::InvalidPath(a.clone()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Build environment
     let mut env_map: HashMap<String, String> = std::env::vars().collect();
@@ -109,8 +112,9 @@ pub fn spawn_service(def: &ServiceDef) -> Result<SpawnedProcess, SpawnError> {
             // Redirect stdout/stderr to the log pipe
             if let Some((_, write_end)) = log_pipe {
                 unsafe {
-                    libc::dup2(write_end, 1); // stdout
-                    libc::dup2(write_end, 2); // stderr
+                    if libc::dup2(write_end, 1) < 0 || libc::dup2(write_end, 2) < 0 {
+                        libc::_exit(126);
+                    }
                     if write_end > 2 {
                         libc::close(write_end);
                     }
@@ -147,7 +151,10 @@ pub fn spawn_service(def: &ServiceDef) -> Result<SpawnedProcess, SpawnError> {
 
             // Drop privileges if user/group specified
             if let Some(ref user_section) = def.service.user {
-                drop_privileges(user_section);
+                if let Err(e) = drop_privileges(user_section) {
+                    eprintln!("dynamod: aborting service — privilege drop failed: {e}");
+                    std::process::exit(126);
+                }
             }
 
             // Exec the service binary
@@ -212,27 +219,25 @@ fn open_pidfd(pid: Pid) -> Option<RawFd> {
 
 /// Drop privileges to the specified user/group.
 /// Order: resolve all IDs → setgroups → setgid → setuid (setuid must be last).
-fn drop_privileges(user_section: &crate::config::service::UserSection) {
+/// Returns an error if any privilege-drop syscall fails, so the caller can abort.
+fn drop_privileges(user_section: &crate::config::service::UserSection) -> Result<(), String> {
     use nix::unistd::{setgid, setgroups, setuid, Gid, Group, Uid, User};
 
     // Resolve the target user (needed for default GID fallback)
-    let resolved_user = user_section.user.as_ref().and_then(|name| {
-        if let Ok(uid) = name.parse::<u32>() {
-            Some((Uid::from_raw(uid), None))
-        } else {
-            match User::from_name(name) {
-                Ok(Some(u)) => Some((u.uid, Some(u.gid))),
-                Ok(None) => {
-                    eprintln!("dynamod: unknown user: {name}");
-                    None
-                }
-                Err(e) => {
-                    eprintln!("dynamod: user lookup failed for '{name}': {e}");
-                    None
+    let resolved_user = match user_section.user.as_ref() {
+        Some(name) => {
+            if let Ok(uid) = name.parse::<u32>() {
+                Some((Uid::from_raw(uid), None))
+            } else {
+                match User::from_name(name) {
+                    Ok(Some(u)) => Some((u.uid, Some(u.gid))),
+                    Ok(None) => return Err(format!("unknown user: {name}")),
+                    Err(e) => return Err(format!("user lookup failed for '{name}': {e}")),
                 }
             }
         }
-    });
+        None => None,
+    };
 
     // Resolve supplementary groups
     let mut supp_gids: Vec<Gid> = Vec::new();
@@ -242,17 +247,17 @@ fn drop_privileges(user_section: &crate::config::service::UserSection) {
         } else {
             match Group::from_name(group_name) {
                 Ok(Some(grp)) => supp_gids.push(grp.gid),
-                Ok(None) => eprintln!("dynamod: unknown supplementary group: {group_name}"),
-                Err(e) => eprintln!("dynamod: group lookup failed for '{group_name}': {e}"),
+                Ok(None) => return Err(format!("unknown supplementary group: {group_name}")),
+                Err(e) => {
+                    return Err(format!("group lookup failed for '{group_name}': {e}"))
+                }
             }
         }
     }
 
     // Set supplementary groups (must happen before setuid)
     if !supp_gids.is_empty() {
-        if let Err(e) = setgroups(&supp_gids) {
-            eprintln!("dynamod: setgroups failed: {e}");
-        }
+        setgroups(&supp_gids).map_err(|e| format!("setgroups failed: {e}"))?;
     }
 
     // Set primary group
@@ -262,33 +267,24 @@ fn drop_privileges(user_section: &crate::config::service::UserSection) {
         } else {
             match Group::from_name(group) {
                 Ok(Some(grp)) => Some(grp.gid),
-                Ok(None) => {
-                    eprintln!("dynamod: unknown group: {group}");
-                    None
-                }
-                Err(e) => {
-                    eprintln!("dynamod: group lookup failed for '{group}': {e}");
-                    None
-                }
+                Ok(None) => return Err(format!("unknown group: {group}")),
+                Err(e) => return Err(format!("group lookup failed for '{group}': {e}")),
             }
         }
     } else {
-        // Fall back to the user's primary group if no explicit group
         resolved_user.as_ref().and_then(|(_, gid)| *gid)
     };
 
     if let Some(gid) = target_gid {
-        if let Err(e) = setgid(gid) {
-            eprintln!("dynamod: setgid({gid}) failed: {e}");
-        }
+        setgid(gid).map_err(|e| format!("setgid({gid}) failed: {e}"))?;
     }
 
     // Set user (must be last — drops ability to change back)
     if let Some((uid, _)) = resolved_user {
-        if let Err(e) = setuid(uid) {
-            eprintln!("dynamod: setuid({uid}) failed: {e}");
-        }
+        setuid(uid).map_err(|e| format!("setuid({uid}) failed: {e}"))?;
     }
+
+    Ok(())
 }
 
 /// Create a pipe, returning (read_fd, write_fd) as raw file descriptors.

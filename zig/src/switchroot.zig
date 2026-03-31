@@ -10,10 +10,6 @@ const kmsg = @import("kmsg.zig");
 const cmdline = @import("cmdline.zig");
 const rootdev = @import("rootdev.zig");
 
-const MS_NOSUID = 0x02;
-const MS_NODEV = 0x04;
-const MS_NOEXEC = 0x08;
-
 /// Perform the full initramfs -> rootfs transition. Does not return.
 ///
 /// 1. Optionally run mdev -s for device node creation
@@ -94,23 +90,93 @@ fn mountRootDevice(
         break :blk @ptrCast(&fstype_z);
     } else "ext4"; // default to ext4
 
-    // Mount flags (default: read-only for safety, remount-root-rw service handles rw)
-    const mount_flags: u32 = constants.MS_RDONLY;
-    _ = flags_opt; // TODO: parse rootflags like "rw,noatime" into mount flags
+    const parsed = parseRootFlags(flags_opt);
 
-    // Data for mount(2)
+    // Remaining (non-flag) mount options as null-terminated data string
+    var data_z: [256:0]u8 = undefined;
+    const data_ptr: usize = if (parsed.data_len > 0) blk: {
+        @memcpy(data_z[0..parsed.data_len], parsed.data_buf[0..parsed.data_len]);
+        data_z[parsed.data_len] = 0;
+        break :blk @intFromPtr(@as([*:0]const u8, @ptrCast(&data_z)));
+    } else 0;
+
     const rc = linux.mount(
         @ptrCast(&dev_z),
         constants.newroot_path,
         fstype_ptr,
-        mount_flags,
-        0,
+        parsed.flags,
+        data_ptr,
     );
     const e = linux.E.init(rc);
     if (e != .SUCCESS) {
         if (klog_arg) |k| k.err("mount failed: errno {d}", .{@intFromEnum(e)});
         return error.MountFailed;
     }
+}
+
+const MS_NOSUID_FLAG = 0x02;
+const MS_NODEV_FLAG = 0x04;
+const MS_NOEXEC_FLAG = 0x08;
+const MS_SYNCHRONOUS = 0x10;
+const MS_NOATIME = 0x400;
+const MS_NODIRATIME = 0x800;
+const MS_RELATIME = 0x200000;
+const MS_STRICTATIME = 0x1000000;
+
+const ParsedFlags = struct {
+    flags: u32,
+    data_buf: [256]u8,
+    data_len: usize,
+};
+
+/// Parse rootflags like "rw,noatime,data=ordered" into mount flags and data.
+/// Recognized flags become kernel mount flags; unrecognized options are passed
+/// as the data string to mount(2) for the filesystem driver.
+fn parseRootFlags(flags_opt: ?[]const u8) ParsedFlags {
+    var result = ParsedFlags{
+        .flags = constants.MS_RDONLY, // default: read-only
+        .data_buf = undefined,
+        .data_len = 0,
+    };
+
+    const flags_str = flags_opt orelse return result;
+
+    var iter = std.mem.tokenizeScalar(u8, flags_str, ',');
+    while (iter.next()) |opt| {
+        if (std.mem.eql(u8, opt, "rw")) {
+            result.flags &= ~constants.MS_RDONLY;
+        } else if (std.mem.eql(u8, opt, "ro")) {
+            result.flags |= constants.MS_RDONLY;
+        } else if (std.mem.eql(u8, opt, "nosuid")) {
+            result.flags |= MS_NOSUID_FLAG;
+        } else if (std.mem.eql(u8, opt, "nodev")) {
+            result.flags |= MS_NODEV_FLAG;
+        } else if (std.mem.eql(u8, opt, "noexec")) {
+            result.flags |= MS_NOEXEC_FLAG;
+        } else if (std.mem.eql(u8, opt, "sync")) {
+            result.flags |= MS_SYNCHRONOUS;
+        } else if (std.mem.eql(u8, opt, "noatime")) {
+            result.flags |= MS_NOATIME;
+        } else if (std.mem.eql(u8, opt, "nodiratime")) {
+            result.flags |= MS_NODIRATIME;
+        } else if (std.mem.eql(u8, opt, "relatime")) {
+            result.flags |= MS_RELATIME;
+        } else if (std.mem.eql(u8, opt, "strictatime")) {
+            result.flags |= MS_STRICTATIME;
+        } else {
+            // Unrecognized option: pass through as data string to fs driver
+            if (result.data_len + opt.len + 1 < result.data_buf.len) {
+                if (result.data_len > 0) {
+                    result.data_buf[result.data_len] = ',';
+                    result.data_len += 1;
+                }
+                @memcpy(result.data_buf[result.data_len..][0..opt.len], opt);
+                result.data_len += opt.len;
+            }
+        }
+    }
+
+    return result;
 }
 
 /// Move /proc, /sys, /dev mounts into /newroot.

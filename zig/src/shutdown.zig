@@ -111,7 +111,7 @@ fn unmountAll(klog: ?kmsg) void {
     // Try to read /proc/mounts to discover all mount points.
     // This handles real root filesystems with additional mounts (/home, /boot, etc.)
     // beyond the 7 hardcoded pseudo-filesystems.
-    var mounts_buf: [8192]u8 = undefined;
+    var mounts_buf: [32768]u8 = undefined;
     const mounts_len = blk: {
         const file = std.fs.openFileAbsolute("/proc/mounts", .{}) catch break :blk @as(usize, 0);
         defer file.close();
@@ -130,8 +130,8 @@ fn unmountAll(klog: ?kmsg) void {
 fn unmountFromProc(data: []const u8, klog: ?kmsg) void {
     // Parse mount targets (second field in each line of /proc/mounts).
     // Store them so we can unmount in reverse order.
-    var targets: [64][256]u8 = undefined;
-    var target_lens: [64]usize = .{0} ** 64;
+    var targets: [256][256]u8 = undefined;
+    var target_lens: [256]usize = .{0} ** 256;
     var count: usize = 0;
 
     var lines = std.mem.tokenizeScalar(u8, data, '\n');

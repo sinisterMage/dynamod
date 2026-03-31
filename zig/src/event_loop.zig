@@ -16,7 +16,6 @@ const EventSource = enum(u64) {
     signal_fd = 1,
     svmgr_pidfd = 2,
     init_sock = 3,
-    restart_timer = 4,
 };
 
 epoll_fd: std.posix.fd_t,
@@ -83,6 +82,7 @@ pub fn unregisterSvmgr(self: *Self) void {
 /// Run the main event loop. Does not return under normal operation.
 pub fn run(self: *Self) noreturn {
     var events: [8]linux.epoll_event = undefined;
+    var consecutive_errors: u32 = 0;
 
     while (true) {
         const nfds = linux.epoll_pwait(self.epoll_fd, &events, events.len, -1, null);
@@ -90,9 +90,25 @@ pub fn run(self: *Self) noreturn {
 
         if (wait_err == .INTR) continue;
         if (wait_err != .SUCCESS) {
-            if (self.klog) |k| k.err("epoll_pwait failed: errno {d}", .{@intFromEnum(wait_err)});
+            consecutive_errors += 1;
+            if (self.klog) |k| k.err("epoll_pwait failed: errno {d} (consecutive: {d})", .{ @intFromEnum(wait_err), consecutive_errors });
+
+            if (consecutive_errors >= 100) {
+                if (self.klog) |k| k.emerg("epoll_pwait failing persistently, initiating shutdown", .{});
+                shutdown.execute(.poweroff, self.klog);
+            }
+
+            // Exponential backoff: 10ms, 20ms, 40ms, ... capped at 1s
+            const backoff_ms: u64 = @min(1000, @as(u64, 10) << @intCast(@min(consecutive_errors, 6)));
+            const ts = linux.timespec{
+                .sec = @intCast(backoff_ms / 1000),
+                .nsec = @intCast((backoff_ms % 1000) * 1_000_000),
+            };
+            _ = linux.nanosleep(&ts, null);
             continue;
         }
+
+        consecutive_errors = 0;
 
         const n: usize = @intCast(nfds);
         for (events[0..n]) |ev| {
@@ -101,7 +117,6 @@ pub fn run(self: *Self) noreturn {
                 .signal_fd => self.handleSignals(),
                 .svmgr_pidfd => self.handleSvmgrExit(),
                 .init_sock => self.handleSvmgrMessage(),
-                .restart_timer => self.handleRestartTimer(),
             }
         }
 
@@ -117,6 +132,16 @@ fn handleSignals(self: *Self) void {
         switch (ev) {
             .child_exited => {
                 _ = reaper.reapAll(self.klog, null);
+                // If pidfd is unavailable, detect svmgr exit via SIGCHLD fallback:
+                // check if our svmgr PID was reaped (kill(pid, 0) fails with ESRCH)
+                if (self.svmgr.getPidfd() == null) {
+                    if (self.svmgr.pid) |pid| {
+                        const rc = linux.kill(pid, 0);
+                        if (linux.E.init(rc) == .SRCH) {
+                            self.handleSvmgrExit();
+                        }
+                    }
+                }
             },
             .shutdown_term => {
                 if (self.klog) |k| k.info("received SIGTERM", .{});
@@ -178,108 +203,35 @@ fn handleSvmgrExit(self: *Self) void {
 fn handleSvmgrMessage(self: *Self) void {
     const sock = self.svmgr.getInitSockFd() orelse return;
 
-    // Read data into the IPC buffer
-    const space = self.ipc_buf.buf[self.ipc_buf.len..];
-    if (space.len == 0) {
-        self.ipc_buf.len = 0;
-        return;
-    }
-
-    const n = std.posix.read(sock, space) catch |e| {
-        if (e == error.WouldBlock) return;
+    self.ipc_buf.readFrom(sock) catch |e| {
+        if (e == error.EndOfStream) {
+            if (self.klog) |k| k.warn("IPC: svmgr closed connection", .{});
+        }
         return;
     };
 
-    if (n == 0) return; // EOF
-    self.ipc_buf.len += n;
-
-    // Process complete messages
-    const constants_mod = @import("constants.zig");
-    const HEADER_SIZE = 6;
-
-    while (self.ipc_buf.len >= HEADER_SIZE) {
-        if (self.ipc_buf.buf[0] != constants_mod.ipc_magic[0] or self.ipc_buf.buf[1] != constants_mod.ipc_magic[1]) {
-            // Bad magic — reset
-            self.ipc_buf.len = 0;
-            return;
-        }
-
-        const payload_len = std.mem.readInt(u32, self.ipc_buf.buf[2..6], .little);
-        if (payload_len > constants_mod.max_message_size) {
-            self.ipc_buf.len = 0;
-            return;
-        }
-
-        const total = HEADER_SIZE + payload_len;
-        if (self.ipc_buf.len < total) break;
-
-        // Parse and handle the message
-        const payload = self.ipc_buf.buf[HEADER_SIZE..total];
-        self.dispatchMessage(payload);
-
-        // Shift remaining data
-        if (self.ipc_buf.len > total) {
-            std.mem.copyForwards(u8, &self.ipc_buf.buf, self.ipc_buf.buf[total..self.ipc_buf.len]);
-        }
-        self.ipc_buf.len -= total;
-    }
-}
-
-/// Parse and dispatch a single IPC message payload.
-fn dispatchMessage(self: *Self, payload: []const u8) void {
-    const msgpack = @import("msgpack.zig");
-
-    // Look for "body" field in the msgpack map
-    const body_raw = msgpack.lookupMapString(payload, "body") orelse {
-        if (self.klog) |k| k.warn("IPC: no body field", .{});
-        return;
-    };
-
-    const body_result = msgpack.decode(body_raw) catch {
-        if (self.klog) |k| k.warn("IPC: failed to decode body", .{});
-        return;
-    };
-
-    switch (body_result.value) {
-        .string => |s| {
-            if (std.mem.eql(u8, s, "Heartbeat")) {
+    while (self.ipc_buf.nextMessage()) |msg| {
+        switch (msg) {
+            .heartbeat => {
                 if (self.svmgr.getInitSockFd()) |fd| {
                     ipc.sendHeartbeatAck(fd, 0);
                 }
-            }
-        },
-        else => {
-            // Check for RequestShutdown
-            if (msgpack.lookupMapString(body_raw, "RequestShutdown")) |shutdown_raw| {
-                const kind_raw = msgpack.lookupMapString(shutdown_raw, "kind") orelse return;
-                const kind_result = msgpack.decode(kind_raw) catch return;
-                if (kind_result.value == .string) {
-                    const kind_str = kind_result.value.string;
-                    if (std.mem.eql(u8, kind_str, "Poweroff")) {
-                        if (self.klog) |k| k.info("svmgr requested poweroff", .{});
-                        self.shutdown_requested = .poweroff;
-                    } else if (std.mem.eql(u8, kind_str, "Reboot")) {
-                        if (self.klog) |k| k.info("svmgr requested reboot", .{});
-                        self.shutdown_requested = .reboot;
-                    } else if (std.mem.eql(u8, kind_str, "Halt")) {
-                        if (self.klog) |k| k.info("svmgr requested halt", .{});
-                        self.shutdown_requested = .halt;
+            },
+            .request_shutdown => |kind| {
+                if (self.klog) |k| k.info("svmgr requested {s}", .{@tagName(kind)});
+                self.shutdown_requested = kind;
+            },
+            .log_to_kmsg => |log| {
+                if (self.klog) |k| {
+                    switch (log.level) {
+                        0...3 => k.err("svmgr: {s}", .{log.message}),
+                        4 => k.warn("svmgr: {s}", .{log.message}),
+                        else => k.info("svmgr: {s}", .{log.message}),
                     }
                 }
-            }
-            // Check for LogToKmsg
-            else if (msgpack.lookupMapString(body_raw, "LogToKmsg")) |log_raw| {
-                const msg_raw = msgpack.lookupMapString(log_raw, "message") orelse return;
-                const msg_result = msgpack.decode(msg_raw) catch return;
-                if (msg_result.value == .string) {
-                    if (self.klog) |k| k.info("svmgr: {s}", .{msg_result.value.string});
-                }
-            }
-        },
+            },
+            .unknown => {},
+        }
     }
 }
 
-fn handleRestartTimer(self: *Self) void {
-    _ = self;
-    // Will be used for timerfd-based restart scheduling in a future phase
-}
