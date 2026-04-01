@@ -243,6 +243,18 @@ fn main() {
             break;
         }
 
+        // Accept dynamodctl connections during startup (listener is non-blocking).
+        if let Some(ref server) = control_server {
+            dispatch_control_actions(
+                server.poll(&tree),
+                &mut tree,
+                &cgroup_hierarchy,
+                &mut cgroup_monitor,
+                &mut init_channel,
+                &dep_graph,
+            );
+        }
+
         // Brief sleep to avoid busy-polling readiness checks
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -274,56 +286,14 @@ fn main() {
 
         // Handle control socket requests
         if let Some(ref server) = control_server {
-            for action in server.poll(&tree) {
-                match action {
-                    ipc::control::ControlAction::StartService(name) => {
-                        start_worker(&mut tree, &name, &cgroup_hierarchy, &mut cgroup_monitor);
-                    }
-                    ipc::control::ControlAction::StopService(name) => {
-                        stop_worker(&mut tree, &name);
-                    }
-                    ipc::control::ControlAction::RestartService(name) => {
-                        let old_pid = tree.get_worker(&name).and_then(|w| w.pid);
-                        stop_worker(&mut tree, &name);
-
-                        // Wait for the old process to actually exit (up to 5s)
-                        if let Some(pid) = old_pid {
-                            let deadline = Instant::now() + Duration::from_secs(5);
-                            loop {
-                                reap_and_handle_exits(
-                                    &mut tree, &cgroup_hierarchy, &mut cgroup_monitor,
-                                );
-                                let still_running = tree
-                                    .get_worker(&name)
-                                    .is_some_and(|w| w.pid == Some(pid));
-                                if !still_running || Instant::now() >= deadline {
-                                    break;
-                                }
-                                std::thread::sleep(Duration::from_millis(50));
-                            }
-                        }
-
-                        start_worker(&mut tree, &name, &cgroup_hierarchy, &mut cgroup_monitor);
-                    }
-                    ipc::control::ControlAction::Reload => {
-                        tracing::info!("reload requested via control socket");
-                        reload_services(
-                            &mut tree, &cgroup_hierarchy, &mut cgroup_monitor,
-                        );
-                    }
-                    ipc::control::ControlAction::Shutdown(kind) => {
-                        tracing::info!("shutdown requested via control socket");
-                        shutdown::execute_shutdown(
-                            &mut tree, &dep_graph,
-                            &cgroup_hierarchy, &mut cgroup_monitor,
-                        );
-                        if let Some(ref mut ch) = init_channel {
-                            let _ = ch.request_shutdown(kind);
-                        }
-                        std::process::exit(0);
-                    }
-                }
-            }
+            dispatch_control_actions(
+                server.poll(&tree),
+                &mut tree,
+                &cgroup_hierarchy,
+                &mut cgroup_monitor,
+                &mut init_channel,
+                &dep_graph,
+            );
         }
 
         // Check for messages from init
@@ -386,6 +356,63 @@ fn main() {
         }
 
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn dispatch_control_actions(
+    actions: Vec<ipc::control::ControlAction>,
+    tree: &mut SupervisorTree,
+    cgroup_hierarchy: &Option<cgroup::hierarchy::CgroupHierarchy>,
+    cgroup_monitor: &mut cgroup::monitor::CgroupMonitor,
+    init_channel: &mut Option<InitChannel>,
+    dep_graph: &dependency::graph::DependencyGraph,
+) {
+    for action in actions {
+        match action {
+            ipc::control::ControlAction::StartService(name) => {
+                start_worker(tree, &name, cgroup_hierarchy, cgroup_monitor);
+            }
+            ipc::control::ControlAction::StopService(name) => {
+                stop_worker(tree, &name);
+            }
+            ipc::control::ControlAction::RestartService(name) => {
+                let old_pid = tree.get_worker(&name).and_then(|w| w.pid);
+                stop_worker(tree, &name);
+
+                if let Some(pid) = old_pid {
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    loop {
+                        reap_and_handle_exits(tree, cgroup_hierarchy, cgroup_monitor);
+                        let still_running = tree
+                            .get_worker(&name)
+                            .is_some_and(|w| w.pid == Some(pid));
+                        if !still_running || Instant::now() >= deadline {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
+
+                start_worker(tree, &name, cgroup_hierarchy, cgroup_monitor);
+            }
+            ipc::control::ControlAction::Reload => {
+                tracing::info!("reload requested via control socket");
+                reload_services(tree, cgroup_hierarchy, cgroup_monitor);
+            }
+            ipc::control::ControlAction::Shutdown(kind) => {
+                tracing::info!("shutdown requested via control socket");
+                shutdown::execute_shutdown(
+                    tree,
+                    dep_graph,
+                    cgroup_hierarchy,
+                    cgroup_monitor,
+                );
+                if let Some(ch) = init_channel {
+                    let _ = ch.request_shutdown(kind);
+                }
+                std::process::exit(0);
+            }
+        }
     }
 }
 

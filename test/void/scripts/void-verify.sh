@@ -144,12 +144,10 @@ echo "[Phase 7] Checking early-boot services..."
 sleep 3
 check_output "hostname set correctly" "dynamod-void-test" hostname
 check_ok "loopback interface exists" ip link show lo
-# machine-id may not exist if dynamod-init tried to create it before
-# remount-root-rw (errno 30 = EROFS). Check but don't fail hard.
 if [ -f /etc/machine-id ] && [ "$(wc -c < /etc/machine-id)" -ge 32 ]; then
     pass "/etc/machine-id exists and valid"
 else
-    fail "/etc/machine-id missing (known: dynamod-init creates before remount-rw)"
+    fail "/etc/machine-id missing or too short"
 fi
 echo ""
 

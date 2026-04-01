@@ -30,6 +30,21 @@ const cmdline_mod = @import("cmdline.zig");
 const switchroot = @import("switchroot.zig");
 
 pub fn main() noreturn {
+    // Helper mode: create /etc/machine-id after root is remounted rw (see machine-id.toml).
+    var arg_it = std.process.args();
+    _ = arg_it.skip();
+    if (arg_it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--write-machine-id")) {
+            // Do not call mountEssentialFilesystems here: it mounts tmpfs on /run (and
+            // other paths). When run as a child after PID 1 already set up the namespace,
+            // a successful mount stacks a fresh /run on top and hides /run/dynamod
+            // (control.sock, notify sockets) from the rest of the system.
+            const klog = kmsg.init();
+            boot.ensureMachineId(klog);
+            std.posix.exit(0);
+        }
+    }
+
     // Phase 0: Early boot
     // Mount essential pseudo-filesystems first (before we can open /dev/kmsg)
     boot.mountEssentialFilesystems(null);
@@ -60,8 +75,8 @@ pub fn main() noreturn {
     // Seed entropy
     boot.seedEntropy(klog);
 
-    // Generate /etc/machine-id if missing (needed for D-Bus and desktop tools)
-    boot.ensureMachineId(klog);
+    // /etc/machine-id is created by the machine-id oneshot after remount-root-rw
+    // (writing here hits EROFS while the real root is still mounted ro).
 
     if (klog) |k| k.info("early boot complete", .{});
 

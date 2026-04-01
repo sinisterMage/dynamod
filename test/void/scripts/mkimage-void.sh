@@ -280,7 +280,7 @@ cp "$PROJECT_ROOT/config/supervisors/"*.toml "$MNT/etc/dynamod/supervisors/"
 # Only install services whose binaries exist in the Void rootfs.
 # Skip: syslog (no syslogd in Void), mdev-coldplug (no mdev, devtmpfs is fine),
 #        example/demo services (nginx, postgresql, sshd, example).
-for svc in fsck remount-root-rw fstab-mount modules-load \
+for svc in fsck remount-root-rw machine-id fstab-mount modules-load \
            bootmisc hostname network sysctl dynamod-logd \
            dbus dynamod-logind dynamod-sd1bridge dynamod-hostnamed; do
     if [ -f "$PROJECT_ROOT/config/services/${svc}.toml" ]; then
@@ -334,7 +334,7 @@ type = "none"
 timeout = "10s"
 
 [dependencies]
-after = ["bootmisc"]
+requires = ["bootmisc", "machine-id"]
 
 [shutdown]
 stop-signal = "SIGTERM"

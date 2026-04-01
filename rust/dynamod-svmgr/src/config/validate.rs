@@ -58,9 +58,6 @@ pub fn validate_all(
     }
 
     let mut supervisor_names: HashSet<&String> = HashSet::new();
-    // "root" is always implicitly available
-    let root = "root".to_string();
-    supervisor_names.insert(&root);
     for sup in supervisors {
         if !supervisor_names.insert(&sup.supervisor.name) {
             errors.push(ValidationError::DuplicateSupervisor(
@@ -73,8 +70,10 @@ pub fn validate_all(
     for svc in services {
         errors.extend(validate_service(svc));
 
-        // Check supervisor reference
-        if !supervisor_names.contains(&svc.service.supervisor) {
+        // Check supervisor reference ("root" is always valid even without root.toml)
+        let sup_ok = svc.service.supervisor == "root"
+            || supervisor_names.contains(&svc.service.supervisor);
+        if !sup_ok {
             errors.push(ValidationError::UnknownSupervisor(
                 svc.service.name.clone(),
                 svc.service.supervisor.clone(),

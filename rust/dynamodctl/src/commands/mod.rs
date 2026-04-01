@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
 use dynamod_common::protocol::{
-    self, Message, MessageBody, MessageKind, ShutdownKind,
+    self, DecodeError, Message, MessageBody, MessageKind, ShutdownKind,
 };
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -27,14 +27,20 @@ fn send_request(socket_path: &str, body: MessageBody) -> std::result::Result<Mes
     let data = protocol::encode(&msg)?;
     stream.write_all(&data)?;
 
-    let mut buf = vec![0u8; 65536];
-    let n = stream.read(&mut buf)?;
-    if n == 0 {
-        return Err("empty response from server".into());
+    let mut buf = vec![0u8; protocol::HEADER_SIZE + protocol::MAX_MESSAGE_SIZE as usize];
+    let mut filled: usize = 0;
+    loop {
+        let n = stream.read(&mut buf[filled..])?;
+        if n == 0 {
+            return Err("connection closed before complete message".into());
+        }
+        filled += n;
+        match protocol::decode(&buf[..filled]) {
+            Ok((resp, _consumed)) => return Ok(resp.body),
+            Err(DecodeError::Incomplete) => continue,
+            Err(e) => return Err(e.into()),
+        }
     }
-
-    let (resp, _) = protocol::decode(&buf[..n])?;
-    Ok(resp.body)
 }
 
 pub fn start(socket_path: &str, name: &str) -> Result {

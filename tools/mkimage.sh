@@ -139,7 +139,7 @@ mkdir -p etc/dynamod/services etc/dynamod/supervisors
 cp "$PROJECT_ROOT/config/supervisors/"*.toml etc/dynamod/supervisors/
 
 for svc in fstab-mount modules-load mdev-coldplug bootmisc hostname \
-           network sysctl syslog dynamod-logd fsck remount-root-rw; do
+           network sysctl syslog dynamod-logd fsck remount-root-rw machine-id; do
     if [ -f "$PROJECT_ROOT/config/services/${svc}.toml" ]; then
         cp "$PROJECT_ROOT/config/services/${svc}.toml" etc/dynamod/services/
     fi
