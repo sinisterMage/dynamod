@@ -28,7 +28,8 @@ pub const ResolvedDevice = struct {
 /// - `/dev/XXX` → use directly
 /// - `UUID=xxxx` → scan /dev/disk/by-uuid/
 /// - `PARTUUID=xxxx` → scan /dev/disk/by-partuuid/
-/// - `LABEL=xxxx` → scan /dev/disk/by-label/
+/// - `LABEL=xxxx` → `/dev/disk/by-label/` symlink (exact or case-insensitive), then `blkid -L`
+///   (minimal initramfs mdev often has no by-label links; blkid finds ISO9660 volume labels).
 ///
 /// If `rootwait` is true, polls every 250ms until the device appears
 /// (up to rootwait_max_s seconds).
@@ -40,12 +41,16 @@ pub fn resolve(root_param: []const u8, rootwait: bool, klog_arg: ?kmsg) ?Resolve
         return resolveDirectPath(root_param, rootwait, klog_arg);
     }
 
-    // UUID=, PARTUUID=, LABEL= resolution via /dev/disk/by-*/ symlinks
+    if (std.mem.startsWith(u8, root_param, "LABEL=")) {
+        const value = root_param["LABEL=".len..];
+        return resolveLabelValue(value, rootwait, klog_arg);
+    }
+
+    // UUID=, PARTUUID= resolution via /dev/disk/by-*/ symlinks
     const SymlinkDir = struct { prefix: []const u8, dir: []const u8 };
     const mappings = [_]SymlinkDir{
         .{ .prefix = "UUID=", .dir = "/dev/disk/by-uuid" },
         .{ .prefix = "PARTUUID=", .dir = "/dev/disk/by-partuuid" },
-        .{ .prefix = "LABEL=", .dir = "/dev/disk/by-label" },
     };
 
     for (&mappings) |m| {
@@ -126,6 +131,145 @@ fn resolveSymlink(dir: []const u8, value: []const u8, rootwait: bool, klog_arg: 
         if (klog_arg) |k| k.err("not found: {s}/{s}", .{ dir, value });
     }
     return null;
+}
+
+const by_label_dir = "/dev/disk/by-label";
+const blkid_path: [*:0]const u8 = "/bin/blkid";
+const blkid_out_path = "/run/dynamod-blkid-out";
+
+/// LABEL=: udev-style symlinks first, then `blkid -L` (works for ISO volume id when by-label is missing).
+fn resolveLabelValue(value: []const u8, rootwait: bool, klog_arg: ?kmsg) ?ResolvedDevice {
+    const max_attempts = if (rootwait)
+        (constants.rootwait_max_s * 1000) / constants.rootwait_poll_ms
+    else
+        @as(u32, 1);
+
+    var attempt: u32 = 0;
+    while (attempt < max_attempts) : (attempt += 1) {
+        if (attempt > 0) {
+            const ts = linux.timespec{
+                .sec = 0,
+                .nsec = @as(i64, constants.rootwait_poll_ms) * 1_000_000,
+            };
+            _ = linux.nanosleep(&ts, null);
+        }
+
+        if (tryResolveLabelSymlinkExact(value)) |r| {
+            if (klog_arg) |k| k.info("resolved LABEL={s} -> {s}", .{ value, r.path() });
+            return r;
+        }
+        if (tryResolveLabelSymlinkScan(value)) |r| {
+            if (klog_arg) |k| k.info("resolved LABEL={s} (by-label scan) -> {s}", .{ value, r.path() });
+            return r;
+        }
+        if (tryBlkidLabelDevice(value, klog_arg)) |r| {
+            if (klog_arg) |k| k.info("resolved LABEL={s} via blkid -> {s}", .{ value, r.path() });
+            return r;
+        }
+    }
+
+    if (rootwait) {
+        if (klog_arg) |k| k.err("timed out waiting for LABEL={s} (by-label and blkid)", .{value});
+    } else {
+        if (klog_arg) |k| k.err("LABEL={s} not found", .{value});
+    }
+    return null;
+}
+
+fn tryResolveLabelSymlinkExact(value: []const u8) ?ResolvedDevice {
+    var link_path_buf: [512]u8 = undefined;
+    const link_path = std.fmt.bufPrint(&link_path_buf, "{s}/{s}", .{ by_label_dir, value }) catch return null;
+    const f = std.fs.openFileAbsolute(link_path, .{}) catch return null;
+    defer f.close();
+    var result = ResolvedDevice{};
+    if (link_path.len > result.path_buf.len - 1) return null;
+    @memcpy(result.path_buf[0..link_path.len], link_path);
+    result.path_buf[link_path.len] = 0;
+    result.path_len = link_path.len;
+    return result;
+}
+
+fn tryResolveLabelSymlinkScan(value: []const u8) ?ResolvedDevice {
+    var dir = std.fs.openDirAbsolute(by_label_dir, .{ .iterate = true }) catch return null;
+    defer dir.close();
+    var it = dir.iterate();
+    while (true) {
+        const entry_opt = it.next() catch return null;
+        const entry = entry_opt orelse break;
+        if (!std.ascii.eqlIgnoreCase(entry.name, value)) continue;
+        var link_path_buf: [512]u8 = undefined;
+        const link_path = std.fmt.bufPrint(&link_path_buf, "{s}/{s}", .{ by_label_dir, entry.name }) catch continue;
+        const f = std.fs.openFileAbsolute(link_path, .{}) catch continue;
+        f.close();
+        var result = ResolvedDevice{};
+        if (link_path.len > result.path_buf.len - 1) continue;
+        @memcpy(result.path_buf[0..link_path.len], link_path);
+        result.path_buf[link_path.len] = 0;
+        result.path_len = link_path.len;
+        return result;
+    }
+    return null;
+}
+
+/// Parse blkid stdout: device-only line or `device: attrs...`.
+fn parseBlkidDeviceLine(raw: []const u8) ?[]const u8 {
+    const line = std.mem.trim(u8, raw, " \t\n\r");
+    if (line.len == 0) return null;
+    const dev_part = if (std.mem.indexOfScalar(u8, line, ':')) |i| line[0..i] else line;
+    const dev = std.mem.trim(u8, dev_part, " \t");
+    if (dev.len < 6 or !std.mem.startsWith(u8, dev, "/dev/")) return null;
+    return dev;
+}
+
+fn tryBlkidLabelDevice(label: []const u8, _: ?kmsg) ?ResolvedDevice {
+    _ = std.fs.openFileAbsolute(std.mem.span(blkid_path), .{}) catch return null;
+
+    var label_z: [256:0]u8 = undefined;
+    if (label.len >= label_z.len - 1) return null;
+    @memcpy(label_z[0..label.len], label);
+    label_z[label.len] = 0;
+
+    const pid_rc = linux.fork();
+    const pid_e = linux.E.init(pid_rc);
+    if (pid_e != .SUCCESS) return null;
+
+    if (pid_rc == 0) {
+        const out: [*:0]const u8 = "/run/dynamod-blkid-out";
+        const out_fd = linux.open(out, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
+        if (linux.E.init(out_fd) != .SUCCESS) linux.exit(127);
+        _ = linux.dup2(@intCast(out_fd), 1);
+        _ = linux.close(@intCast(out_fd));
+        const null_fd = linux.open("/dev/null", .{ .ACCMODE = .WRONLY }, 0);
+        if (linux.E.init(null_fd) == .SUCCESS) {
+            _ = linux.dup2(@intCast(null_fd), 2);
+            _ = linux.close(@intCast(null_fd));
+        }
+        const arg_l: [*:0]const u8 = "-L";
+        const argv = [_:null]?[*:0]const u8{ blkid_path, arg_l, @ptrCast(&label_z) };
+        const envp = [_:null]?[*:0]const u8{};
+        _ = linux.execve(blkid_path, &argv, &envp);
+        linux.exit(127);
+    }
+
+    var status: u32 = 0;
+    _ = linux.wait4(@intCast(pid_rc), &status, 0, null);
+    // Normal exit: low byte 0; exit code in bits 8–15 (Linux wait status).
+    if ((status & 0xff) != 0) return null;
+    if (((status >> 8) & 0xff) != 0) return null;
+
+    const file = std.fs.openFileAbsolute(blkid_out_path, .{}) catch return null;
+    defer file.close();
+    var read_buf: [300]u8 = undefined;
+    const n = file.readAll(&read_buf) catch return null;
+    const dev_path = parseBlkidDeviceLine(read_buf[0..n]) orelse return null;
+    if (!deviceExists(dev_path)) return null;
+
+    var result = ResolvedDevice{};
+    if (dev_path.len > result.path_buf.len - 1) return null;
+    @memcpy(result.path_buf[0..dev_path.len], dev_path);
+    result.path_buf[dev_path.len] = 0;
+    result.path_len = dev_path.len;
+    return result;
 }
 
 /// Wait for a device to appear, polling every rootwait_poll_ms.

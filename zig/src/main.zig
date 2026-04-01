@@ -28,6 +28,7 @@ const constants = @import("constants.zig");
 const shutdown_mod = @import("shutdown.zig");
 const cmdline_mod = @import("cmdline.zig");
 const switchroot = @import("switchroot.zig");
+const live = @import("live.zig");
 
 pub fn main() noreturn {
     // Helper mode: create /etc/machine-id after root is remounted rw (see machine-id.toml).
@@ -56,13 +57,15 @@ pub fn main() noreturn {
     // Check if we're in an initramfs and need to switch_root
     if (boot.isInitramfs()) {
         const cl = cmdline_mod.Cmdline.read(klog);
-        if (cl.getRoot() != null) {
+        if (cl.isLive()) {
+            live.doLiveSwitchRoot(&cl, klog);
+        } else if (cl.getRoot() != null) {
             // Initramfs mode: mount real root and switch to it
             // This calls execve and does NOT return.
             switchroot.doSwitchRoot(&cl, klog);
         }
-        // No root= parameter: stay in initramfs (test/development mode)
-        if (klog) |k| k.info("initramfs mode: no root= param, staying in initramfs", .{});
+        // No root= / live: stay in initramfs (test/development mode)
+        if (klog) |k| k.info("initramfs mode: no root= or dynamod.live, staying in initramfs", .{});
     }
 
     // Phase 1: Real root boot (runs after switch_root or when booted directly)

@@ -15,6 +15,12 @@
 #   - sfdisk, mkfs.ext4, losetup, mount (from util-linux)
 #   - cpio, gzip
 #   - wget or curl (for Alpine download)
+#
+# Custom / modular kernel (live ISO, /dev/sr0, squashfs as modules):
+#   The default initramfs has no /lib/modules, so busybox modprobe cannot load drivers.
+#   Either build those drivers built-in (=y), or bundle the matching tree:
+#     INITRAMFS_MODULES_DIR=/lib/modules/$(uname -r) sudo -E tools/mkimage.sh
+#   Use the same kernel version you pass to QEMU (-kernel).
 
 set -e
 
@@ -220,13 +226,37 @@ fi
 if [ -n "$BUSYBOX" ] && [ -f "$BUSYBOX" ]; then
     cp "$BUSYBOX" "$INITRAMFS_DIR/bin/busybox"
     # Create symlinks needed during initramfs phase
-    for cmd in sh mdev mount umount; do
+    for cmd in sh mdev mount umount losetup modprobe blkid; do
         ln -sf busybox "$INITRAMFS_DIR/bin/$cmd"
     done
     ln -sf ../bin/mdev "$INITRAMFS_DIR/sbin/mdev"
-    echo "  Included busybox for mdev"
+    mkdir -p "$INITRAMFS_DIR/etc"
+    # Hints for modular kernels (dynamod-init uses in-kernel loop ioctls; FS may still be modules)
+    cat > "$INITRAMFS_DIR/etc/modules" <<'MODS'
+scsi_mod
+ata_piix
+cdrom
+sr_mod
+squashfs
+loop
+iso9660
+udf
+overlay
+MODS
+    echo "  Included busybox for mdev, mount helpers, and etc/modules hints"
 else
     echo "  WARNING: No busybox found — UUID/LABEL resolution won't work"
+fi
+
+if [ -n "${INITRAMFS_MODULES_DIR:-}" ] && [ -d "$INITRAMFS_MODULES_DIR" ]; then
+    KVER="$(basename "$INITRAMFS_MODULES_DIR")"
+    echo "  Bundling kernel modules: $INITRAMFS_MODULES_DIR -> lib/modules/$KVER"
+    mkdir -p "$INITRAMFS_DIR/lib/modules"
+    cp -a "$INITRAMFS_MODULES_DIR" "$INITRAMFS_DIR/lib/modules/$KVER"
+else
+    if [ -n "${INITRAMFS_MODULES_DIR:-}" ]; then
+        echo "  WARNING: INITRAMFS_MODULES_DIR=$INITRAMFS_MODULES_DIR is not a directory"
+    fi
 fi
 
 # Pack initramfs

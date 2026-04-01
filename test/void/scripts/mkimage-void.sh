@@ -460,11 +460,23 @@ fi
 
 if [ -n "$BUSYBOX" ] && [ -f "$BUSYBOX" ]; then
     cp "$BUSYBOX" "$INITRAMFS_DIR/bin/busybox"
-    for cmd in sh mdev mount umount; do
+    for cmd in sh mdev mount umount losetup modprobe blkid; do
         ln -sf busybox "$INITRAMFS_DIR/bin/$cmd"
     done
     ln -sf ../bin/mdev "$INITRAMFS_DIR/sbin/mdev"
-    echo "  Included busybox for mdev"
+    mkdir -p "$INITRAMFS_DIR/etc"
+    cat > "$INITRAMFS_DIR/etc/modules" <<'MODS'
+scsi_mod
+ata_piix
+cdrom
+sr_mod
+squashfs
+loop
+iso9660
+udf
+overlay
+MODS
+    echo "  Included busybox for mdev, mount helpers, and etc/modules hints"
 else
     echo "  WARNING: No busybox found -- mdev won't be available in initramfs"
 fi

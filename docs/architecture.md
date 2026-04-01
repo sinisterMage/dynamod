@@ -13,9 +13,8 @@ kernel
         │
         │  Phase A (initramfs):
         │    mount /proc, /sys, /dev
-        │    parse root= from /proc/cmdline
-        │    mount root device on /newroot
-        │    switch_root → re-exec from real rootfs
+        │    parse cmdline: root= (disk) or dynamod.live (ISO → squashfs → overlay)
+        │    mount real root on /newroot, then switch_root → re-exec
         │
         │  Phase B (real root):
         │    mount remaining pseudo-fs
@@ -51,14 +50,15 @@ kernel
 
 ### dynamod-init (Zig)
 
-The PID 1 process. Intentionally minimal (~2300 lines of Zig across 14 files)
+The PID 1 process. Intentionally minimal (~2500 lines of Zig across 15 files)
 to minimize the chance of a crash that would bring down the system.
 
 **What it does:**
 
 - **Two-phase boot**: detects whether it's in an initramfs (via `statfs("/")`),
-  and if `root=` is on the kernel cmdline, performs the full initramfs-to-rootfs
-  transition (mount root, move pseudo-fs, delete initramfs, `switch_root`, re-exec)
+  and if `root=` or `dynamod.live` is on the kernel cmdline, performs the
+  initramfs-to-rootfs transition (disk mount or ISO/squashfs/overlay pipeline, then
+  move pseudo-fs, delete initramfs, `switch_root`, re-exec)
 - **Mount pseudo-filesystems**: `/proc`, `/sys`, `/dev`, `/dev/pts`, `/dev/shm`,
   `/run`, `/sys/fs/cgroup`
 - **Early system setup**: set hostname, seed entropy, generate `/etc/machine-id`
@@ -131,11 +131,13 @@ Verified working with **sway** (Wayland compositor via seatd) and
 
 ## Boot sequence
 
-### Phase A: Initramfs (when `root=` is on the cmdline)
+### Phase A: Initramfs (when `root=` or `dynamod.live` is on the cmdline)
+
+**Disk path** (`root=` set, `dynamod.live` off):
 
 1. Kernel unpacks initramfs, executes `dynamod-init` as PID 1
 2. Mount `/proc`, `/sys`, `/dev` (3 pseudo-filesystems)
-3. Read `/proc/cmdline`, extract `root=`, `rootfstype=`, `rootflags=`, `rootwait`
+3. Read `/proc/cmdline`, extract `root=`, `rootfstype=`, `rootflags=`, `rootwait`, `rootdelay`
 4. Run `mdev -s` to create device nodes (needed for UUID/LABEL resolution)
 5. Resolve root device:
    - `/dev/sda1` → use directly
@@ -143,11 +145,29 @@ Verified working with **sway** (Wayland compositor via seatd) and
    - `PARTUUID=xxxx` → scan `/dev/disk/by-partuuid/`
    - `LABEL=xxxx` → scan `/dev/disk/by-label/`
 6. Wait for device if `rootwait` is set (poll every 250ms, max 30s)
-7. Mount root device on `/newroot` (read-only by default)
+7. Mount root device on `/newroot` (read-only by default; default fstype `ext4` if omitted)
 8. Move `/proc`, `/sys`, `/dev` to `/newroot/proc`, `/newroot/sys`, `/newroot/dev`
 9. Delete initramfs contents (recursive, skip mount points) to free RAM
 10. `chdir("/newroot")` → `mount(".", "/", MS_MOVE)` → `chroot(".")` → `chdir("/")`
 11. `execve("/sbin/dynamod-init")` — re-exec from the real rootfs
+
+**Live / ISO path** (`dynamod.live=1` or bare `dynamod.live`):
+
+| Parameter | Meaning |
+|-----------|---------|
+| `dynamod.media=` | Block device with the ISO (same forms as `root=`: `/dev/sr0`, `LABEL=…`, `UUID=…`) |
+| `dynamod.squashfs=` | Path to the squashfs file inside the ISO (default `/live/root.squashfs`) |
+| `dynamod.overlay=` | If `0`/`false`/`no`, bind-mount squashfs on `/newroot` (read-only). Otherwise (default) use overlayfs with upper/work on tmpfs under `/run/dynamod/live/` |
+
+Steps: resolve `dynamod.media` (honours `rootwait` / `rootdelay`); best-effort `modprobe` for `loop`, `squashfs`, `iso9660`, `udf`, `overlay` when `/bin/modprobe` exists in the initramfs; mount the device as **iso9660** or **udf**; attach a **loop** device to the squashfs image and mount **squashfs**; optionally stack **overlayfs** on `/newroot`; then the same move/delete/re-exec sequence as the disk path.
+
+A **single** `root=` mount with `rootfstype=squashfs` is still supported when the squashfs lives on a **block** device (no file-on-ISO indirection).
+
+Packaging helper: `tools/mkiso.sh` builds `dynamod-live.iso` with volume id **DYNAISO** and `live/root.squashfs` from an existing `tools/mkimage.sh` disk image; use `dynamod.media=LABEL=DYNAISO` in the kernel cmdline. Minimal initramfs BusyBox **mdev** does not create `/dev/disk/by-label/`; init falls back to **`blkid -L`** (the initramfs includes a `blkid` → busybox symlink). If your BusyBox build omits `blkid`, use `dynamod.media=/dev/sr0` or add util-linux `blkid` to the initramfs.
+
+**Early-boot services on live systems:** With overlay (default), `/` is writable and `remount-root-rw` behaves like a normal disk root. With `dynamod.overlay=0`, root stays read-only — adjust or drop `remount-root-rw` / machine-id generation for that profile if needed.
+
+**Custom / modular kernels:** The test initramfs from `tools/mkimage.sh` does not include `/lib/modules` unless you add it. If ATA/SCSI CD (`sr_mod`), `iso9660`, `squashfs`, `overlay`, or `loop` are **modules** (`=m`), `modprobe` in the initramfs will fail until you either: (1) build those options **built-in** (`=y`) in your kernel, or (2) rebuild the initramfs with **`INITRAMFS_MODULES_DIR=/lib/modules/<same-as-boot-kernel>`** (full `modules_install` tree for the kernel you pass to QEMU). dynamod skips `modprobe` when `/lib/modules` is missing and logs a short warning instead of spamming errors.
 
 ### Phase B: Real root
 

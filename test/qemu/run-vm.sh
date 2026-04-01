@@ -130,6 +130,12 @@ timeout --foreground "$TIMEOUT" \
 echo "---"
 log "QEMU session ended."
 
+# Live ISO smoke test (after: make, sudo tools/mkimage.sh, sudo tools/mkiso.sh):
+#   qemu-system-x86_64 -kernel "$KERNEL" -initrd /path/to/build-disk/initramfs.gz \
+#     -cdrom /path/to/build-disk/dynamod-live.iso \
+#     -append 'console=ttyS0 rdinit=/sbin/dynamod-init dynamod.live=1 dynamod.media=LABEL=DYNAISO dynamod.squashfs=/live/root.squashfs rootwait' \
+#     -nographic -no-reboot -m 512M
+
 # Cleanup
 rm -rf "$BUILD_DIR"
 log "Done."

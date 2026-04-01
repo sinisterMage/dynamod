@@ -58,3 +58,11 @@ pub const init_path: [*:0]const u8 = "/sbin/dynamod-init";
 
 /// Path to mdev binary (busybox applet, for device node creation).
 pub const mdev_path: [*:0]const u8 = "/sbin/mdev";
+
+// --- ISO / live boot staging (under tmpfs /run) ---
+
+pub const live_staging_base = "/run/dynamod/live";
+pub const live_iso_mp = "/run/dynamod/live/iso";
+pub const live_squash_mp = "/run/dynamod/live/squash";
+pub const live_upper_mp = "/run/dynamod/live/upper";
+pub const live_work_mp = "/run/dynamod/live/work";

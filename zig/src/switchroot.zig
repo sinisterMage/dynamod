@@ -18,6 +18,15 @@ const rootdev = @import("rootdev.zig");
 /// 4. Move /proc, /sys, /dev to /newroot
 /// 5. Delete initramfs contents
 /// 6. switch_root: chdir + MS_MOVE + chroot + execve
+/// After the real root is mounted on `/newroot`, move pseudo-fs mounts, clean initramfs, re-exec.
+pub fn finishAfterRootMounted(klog_arg: ?kmsg) noreturn {
+    moveMounts(klog_arg);
+    if (klog_arg) |k| k.info("cleaning up initramfs...", .{});
+    deleteInitramfsContents();
+    if (klog_arg) |k| k.info("switching root to /newroot", .{});
+    execSwitchRoot(klog_arg);
+}
+
 pub fn doSwitchRoot(cl: *const cmdline.Cmdline, klog_arg: ?kmsg) noreturn {
     const root_param = cl.getRoot() orelse {
         if (klog_arg) |k| k.emerg("no root= parameter on cmdline", .{});
@@ -56,16 +65,7 @@ pub fn doSwitchRoot(cl: *const cmdline.Cmdline, klog_arg: ?kmsg) noreturn {
 
     if (klog_arg) |k| k.info("mounted {s} on /newroot", .{resolved.path()});
 
-    // Move pseudo-filesystem mounts to /newroot
-    moveMounts(klog_arg);
-
-    // Delete initramfs contents to free RAM
-    if (klog_arg) |k| k.info("cleaning up initramfs...", .{});
-    deleteInitramfsContents();
-
-    // Switch root
-    if (klog_arg) |k| k.info("switching root to /newroot", .{});
-    execSwitchRoot(klog_arg);
+    finishAfterRootMounted(klog_arg);
 }
 
 /// Mount the root device on /newroot.
@@ -337,7 +337,7 @@ fn execSwitchRoot(klog_arg: ?kmsg) noreturn {
 
 /// Fork and exec mdev -s to create device nodes in /dev.
 /// This is needed for UUID/LABEL resolution via /dev/disk/by-*/ symlinks.
-fn runMdev(klog_arg: ?kmsg) void {
+pub fn runMdev(klog_arg: ?kmsg) void {
     // Check if mdev exists
     _ = std.fs.openFileAbsolute("/sbin/mdev", .{}) catch {
         if (klog_arg) |k| k.info("mdev not found, skipping device scan", .{});

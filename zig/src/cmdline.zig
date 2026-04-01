@@ -84,6 +84,33 @@ pub const Cmdline = struct {
         return std.fmt.parseInt(u32, val, 10) catch 0;
     }
 
+    /// True when dynamod ISO/live pipeline is enabled (dynamod.live flag or =1/true/yes).
+    pub fn isLive(self: *const Cmdline) bool {
+        if (self.hasFlag("dynamod.live")) return true;
+        const v = self.getParam("dynamod.live") orelse return false;
+        return std.mem.eql(u8, v, "1") or
+            std.mem.eql(u8, v, "true") or
+            std.mem.eql(u8, v, "yes");
+    }
+
+    /// Block device holding the ISO (LABEL=, UUID=, /dev/...), same grammar as root=.
+    pub fn getLiveMedia(self: *const Cmdline) ?[]const u8 {
+        return self.getParam("dynamod.media");
+    }
+
+    /// Path to squashfs image inside the mounted ISO (default: /live/root.squashfs).
+    pub fn getLiveSquashfsPath(self: *const Cmdline) []const u8 {
+        return self.getParam("dynamod.squashfs") orelse "/live/root.squashfs";
+    }
+
+    /// Use overlayfs (tmpfs upper/work) on top of squashfs; default true when live is on.
+    pub fn liveUseOverlay(self: *const Cmdline) bool {
+        const v = self.getParam("dynamod.overlay") orelse return true;
+        if (std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false") or std.mem.eql(u8, v, "no"))
+            return false;
+        return true;
+    }
+
     /// Get the raw command line as a string slice.
     pub fn raw(self: *const Cmdline) []const u8 {
         return self.buf[0..self.len];
@@ -133,4 +160,28 @@ test "parse rootdelay" {
     cl.len = input.len;
 
     try std.testing.expect(cl.getRootDelay() == 5);
+}
+
+test "parse dynamod live cmdline" {
+    var cl = Cmdline{};
+    const input = "dynamod.live=1 dynamod.media=LABEL=DYNAISO dynamod.squashfs=/live/root.squashfs dynamod.overlay=0";
+    @memcpy(cl.buf[0..input.len], input);
+    cl.len = input.len;
+
+    try std.testing.expect(cl.isLive());
+    try std.testing.expectEqualStrings("LABEL=DYNAISO", cl.getLiveMedia().?);
+    try std.testing.expectEqualStrings("/live/root.squashfs", cl.getLiveSquashfsPath());
+    try std.testing.expect(!cl.liveUseOverlay());
+}
+
+test "dynamod live bare flag and defaults" {
+    var cl = Cmdline{};
+    const input = "dynamod.live console=ttyS0";
+    @memcpy(cl.buf[0..input.len], input);
+    cl.len = input.len;
+
+    try std.testing.expect(cl.isLive());
+    try std.testing.expect(cl.getLiveMedia() == null);
+    try std.testing.expectEqualStrings("/live/root.squashfs", cl.getLiveSquashfsPath());
+    try std.testing.expect(cl.liveUseOverlay());
 }
