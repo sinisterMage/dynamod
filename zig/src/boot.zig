@@ -24,7 +24,8 @@ const essential_mounts = [_]MountEntry{
     .{ .source = "devtmpfs", .target = "/dev", .fstype = "devtmpfs", .flags = MS_NOSUID | MS_STRICTATIME, .data = "mode=0755" },
     .{ .source = "devpts", .target = "/dev/pts", .fstype = "devpts", .flags = MS_NOSUID | MS_NOEXEC, .data = "mode=0620,gid=5" },
     .{ .source = "tmpfs", .target = "/dev/shm", .fstype = "tmpfs", .flags = MS_NOSUID | MS_NODEV, .data = null },
-    .{ .source = "tmpfs", .target = "/run", .fstype = "tmpfs", .flags = MS_NOSUID | MS_NODEV | MS_STRICTATIME, .data = "mode=0755" },
+    // Default tmpfs cap is ~50% RAM; live boot copies the full squashfs into /run — raise limit.
+    .{ .source = "tmpfs", .target = "/run", .fstype = "tmpfs", .flags = MS_NOSUID | MS_NODEV | MS_STRICTATIME, .data = "mode=0755,size=85%" },
     .{ .source = "cgroup2", .target = "/sys/fs/cgroup", .fstype = "cgroup2", .flags = MS_NOSUID | MS_NODEV | MS_NOEXEC, .data = null },
 };
 

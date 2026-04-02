@@ -66,3 +66,5 @@ pub const live_iso_mp = "/run/dynamod/live/iso";
 pub const live_squash_mp = "/run/dynamod/live/squash";
 pub const live_upper_mp = "/run/dynamod/live/upper";
 pub const live_work_mp = "/run/dynamod/live/work";
+/// Tmpfs copy of the squashfs image before loop attach (avoids loop+iso9660 hangs on some kernels).
+pub const live_squash_tmp_path: [*:0]const u8 = "/run/dynamod/live/root.squashfs.work";
