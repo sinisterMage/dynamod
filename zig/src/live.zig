@@ -391,11 +391,11 @@ pub fn doLiveSwitchRoot(cl: *const cmdline.Cmdline, klog_arg: ?kmsg) noreturn {
 
     if (klog_arg) |k| k.info("dynamod live: media={s}", .{media});
 
-    switchroot.runMdev(klog_arg);
+    switchroot.runColdplug(klog_arg);
 
     loadLiveMediaModules(klog_arg);
     // New block devices may have appeared; refresh nodes (esp. if not only devtmpfs).
-    switchroot.runMdev(klog_arg);
+    switchroot.runColdplug(klog_arg);
 
     const resolved = rootdev.resolve(media, cl.hasRootwait(), klog_arg) orelse {
         if (klog_arg) |k| k.emerg("dynamod.live: failed to resolve dynamod.media", .{});

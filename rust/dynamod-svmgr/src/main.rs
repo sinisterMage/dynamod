@@ -178,6 +178,7 @@ fn main() {
 
     // Process the frontier until all services are started
     loop {
+
         // Reap exited children during startup (handles oneshot completion)
         reap_oneshots_during_startup(
             &mut tree, &mut pending_oneshots, &mut frontier,

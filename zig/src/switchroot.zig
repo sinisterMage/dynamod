@@ -12,7 +12,7 @@ const rootdev = @import("rootdev.zig");
 
 /// Perform the full initramfs -> rootfs transition. Does not return.
 ///
-/// 1. Optionally run mdev -s for device node creation
+/// 1. Run device coldplug (udevadm or mdev) for device node creation
 /// 2. Resolve the root device
 /// 3. Mount root device on /newroot
 /// 4. Move /proc, /sys, /dev to /newroot
@@ -35,8 +35,8 @@ pub fn doSwitchRoot(cl: *const cmdline.Cmdline, klog_arg: ?kmsg) noreturn {
 
     if (klog_arg) |k| k.info("initramfs: root={s}", .{root_param});
 
-    // Run mdev -s to create device nodes (if mdev is available)
-    runMdev(klog_arg);
+    // Run device coldplug (udevadm or mdev) for device node creation
+    runColdplug(klog_arg);
 
     // Resolve root device
     const resolved = rootdev.resolve(root_param, cl.hasRootwait(), klog_arg) orelse {
@@ -335,37 +335,64 @@ fn execSwitchRoot(klog_arg: ?kmsg) noreturn {
     halt();
 }
 
-/// Fork and exec mdev -s to create device nodes in /dev.
-/// This is needed for UUID/LABEL resolution via /dev/disk/by-*/ symlinks.
-pub fn runMdev(klog_arg: ?kmsg) void {
-    // Check if mdev exists
-    _ = std.fs.openFileAbsolute("/sbin/mdev", .{}) catch {
-        if (klog_arg) |k| k.info("mdev not found, skipping device scan", .{});
-        return;
-    };
-
-    if (klog_arg) |k| k.info("running mdev -s for device enumeration", .{});
-
+/// Fork, exec a program with the given argv, and wait for it to finish.
+/// Returns true if the child exited successfully (status 0), false otherwise.
+fn forkExecWait(
+    path: [*:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    klog_arg: ?kmsg,
+) bool {
     const pid_rc = linux.fork();
     const pid_e = linux.E.init(pid_rc);
     if (pid_e != .SUCCESS) {
-        if (klog_arg) |k| k.warn("fork for mdev failed", .{});
-        return;
+        if (klog_arg) |k| k.warn("fork failed for {s}", .{std.mem.span(path)});
+        return false;
     }
 
     if (pid_rc == 0) {
-        // Child: exec mdev -s
-        const mdev_argv = [_:null]?[*:0]const u8{ constants.mdev_path, "-s" };
-        const mdev_envp = [_:null]?[*:0]const u8{};
-        _ = linux.execve(constants.mdev_path, &mdev_argv, &mdev_envp);
-        // If exec fails, exit child
+        const envp = [_:null]?[*:0]const u8{};
+        _ = linux.execve(path, argv, &envp);
         linux.exit(1);
     }
 
-    // Parent: wait for mdev to finish
     var status: u32 = 0;
     _ = linux.wait4(@intCast(pid_rc), &status, 0, null);
-    if (klog_arg) |k| k.info("mdev completed", .{});
+    return (status & 0xff00) == 0;
+}
+
+fn binaryExists(path: []const u8) bool {
+    _ = std.fs.openFileAbsolute(path, .{}) catch return false;
+    return true;
+}
+
+/// Run device coldplug to create device nodes in /dev.
+/// Tries udevadm (eudev/systemd-udev) first, falls back to mdev (busybox).
+/// This is needed for UUID/LABEL resolution via /dev/disk/by-*/ symlinks.
+pub fn runColdplug(klog_arg: ?kmsg) void {
+    if (binaryExists("/usr/bin/udevadm")) {
+        if (klog_arg) |k| k.info("running udevadm trigger+settle for device enumeration", .{});
+
+        const trigger_argv = [_:null]?[*:0]const u8{ constants.udevadm_path, "trigger", "--action=add" };
+        _ = forkExecWait(constants.udevadm_path, &trigger_argv, klog_arg);
+
+        const settle_argv = [_:null]?[*:0]const u8{ constants.udevadm_path, "settle", "--timeout=10" };
+        _ = forkExecWait(constants.udevadm_path, &settle_argv, klog_arg);
+
+        if (klog_arg) |k| k.info("udevadm coldplug completed", .{});
+        return;
+    }
+
+    if (binaryExists("/sbin/mdev")) {
+        if (klog_arg) |k| k.info("running mdev -s for device enumeration", .{});
+
+        const mdev_argv = [_:null]?[*:0]const u8{ constants.mdev_path, "-s" };
+        _ = forkExecWait(constants.mdev_path, &mdev_argv, klog_arg);
+
+        if (klog_arg) |k| k.info("mdev coldplug completed", .{});
+        return;
+    }
+
+    if (klog_arg) |k| k.info("no device manager found (udevadm, mdev), skipping coldplug", .{});
 }
 
 /// Emergency halt — called when switch_root fails irrecoverably.

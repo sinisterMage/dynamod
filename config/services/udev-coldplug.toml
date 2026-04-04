@@ -1,0 +1,18 @@
+[service]
+name = "udev-coldplug"
+supervisor = "early-boot"
+exec = ["/bin/sh", "-c", "udevadm trigger --action=add && udevadm settle --timeout=30"]
+type = "oneshot"
+
+[restart]
+policy = "temporary"
+
+[dependencies]
+requires = ["udev"]
+
+[readiness]
+type = "none"
+
+[shutdown]
+stop-signal = "SIGTERM"
+stop-timeout = "5s"

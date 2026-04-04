@@ -1,0 +1,21 @@
+[service]
+name = "udev"
+supervisor = "early-boot"
+exec = ["/bin/sh", "-c", "exec udevd"]
+type = "simple"
+
+[restart]
+policy = "permanent"
+delay = "1s"
+max-restarts = 5
+max-restart-window = "60s"
+
+[dependencies]
+requires = ["modules-load"]
+
+[readiness]
+type = "none"
+
+[shutdown]
+stop-signal = "SIGTERM"
+stop-timeout = "5s"

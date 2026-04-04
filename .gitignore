@@ -16,6 +16,8 @@ test/alpine/build-gnome
 test/alpine/build-disk
 test/void/build-full
 test/void/.cache/
+test/artix/build-full
+test/artix/.cache/
 # Editor
 *.swp
 *.swo
