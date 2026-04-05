@@ -38,6 +38,11 @@ pub fn doSwitchRoot(cl: *const cmdline.Cmdline, klog_arg: ?kmsg) noreturn {
     // Run device coldplug (udevadm or mdev) for device node creation
     runColdplug(klog_arg);
 
+    // Load common block-device modules so disk nodes appear on devtmpfs
+    loadDiskModules(klog_arg);
+    // Re-run coldplug: new block devices may have appeared after module load
+    runColdplug(klog_arg);
+
     // Resolve root device
     const resolved = rootdev.resolve(root_param, cl.hasRootwait(), klog_arg) orelse {
         if (klog_arg) |k| k.emerg("failed to resolve root device: {s}", .{root_param});
@@ -363,6 +368,41 @@ fn forkExecWait(
 fn binaryExists(path: []const u8) bool {
     _ = std.fs.openFileAbsolute(path, .{}) catch return false;
     return true;
+}
+
+/// Load common block-device and filesystem kernel modules so that disk
+/// devices appear in /dev before root resolution.  Best-effort: silently
+/// skips modules that don't exist or fail to load.
+fn loadDiskModules(klog_arg: ?kmsg) void {
+    {
+        var d = std.fs.openDirAbsolute("/lib/modules", .{}) catch return;
+        d.close();
+    }
+
+    const modprobe_path: [*:0]const u8 = "/bin/modprobe";
+    _ = std.fs.openFileAbsolute(std.mem.span(modprobe_path), .{}) catch return;
+
+    if (klog_arg) |k| k.info("loading disk/storage modules (best-effort)", .{});
+
+    const modules = [_][*:0]const u8{
+        "virtio_pci",
+        "virtio_blk",
+        "virtio_scsi",
+        "scsi_mod",
+        "sd_mod",
+        "ata_piix",
+        "ahci",
+        "nvme",
+        "usb-storage",
+        "ext4",
+        "btrfs",
+        "xfs",
+    };
+
+    for (&modules) |mod| {
+        const argv = [_:null]?[*:0]const u8{ modprobe_path, mod };
+        _ = forkExecWait(modprobe_path, &argv, null);
+    }
 }
 
 /// Run device coldplug to create device nodes in /dev.
