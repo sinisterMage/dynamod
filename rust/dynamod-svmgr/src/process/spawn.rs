@@ -94,6 +94,12 @@ pub fn spawn_service(def: &ServiceDef) -> Result<SpawnedProcess, SpawnError> {
         env_map.insert("DYNAMOD_READY_FD".to_string(), write_end.to_string());
     }
 
+    // Set NOTIFY_SOCKET for sd_notify-compatible services
+    if def.readiness.readiness_type == ReadinessType::Notify {
+        let notify_path = format!("/run/dynamod/notify-{}.sock", def.service.name);
+        env_map.insert("NOTIFY_SOCKET".to_string(), notify_path);
+    }
+
     let env: Vec<CString> = env_map
         .iter()
         .filter_map(|(k, v)| CString::new(format!("{k}={v}")).ok())
