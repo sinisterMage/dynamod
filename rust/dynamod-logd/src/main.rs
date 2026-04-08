@@ -35,7 +35,10 @@ fn main() {
         }
     });
 
-    // Collect from stdin on main thread (piped from svmgr or service)
+    // Collect from stdin on main thread (piped from svmgr or service).
+    // stdin may be /dev/null (EOF immediately) when the service manager
+    // redirects it; in that case we park the main thread so the socket
+    // collector keeps running.
     tracing::info!("collecting logs from stdin and socket");
     {
         let mut store_guard = store.lock().unwrap();
@@ -44,5 +47,8 @@ fn main() {
         }
     }
 
-    tracing::info!("dynamod-logd exiting");
+    tracing::info!("stdin closed, parking main thread (socket collector still active)");
+    loop {
+        std::thread::park();
+    }
 }

@@ -115,6 +115,22 @@ pub fn spawn_service(def: &ServiceDef) -> Result<SpawnedProcess, SpawnError> {
         ForkResult::Child => {
             // === Child process ===
 
+            // Redirect stdin to /dev/null so services don't inherit
+            // the console fd and steal keystrokes from login/greeter
+            // processes (agetty, greetd) that open their own TTY.
+            unsafe {
+                let devnull = libc::open(
+                    b"/dev/null\0".as_ptr() as *const libc::c_char,
+                    libc::O_RDONLY,
+                );
+                if devnull >= 0 {
+                    libc::dup2(devnull, 0);
+                    if devnull > 0 {
+                        libc::close(devnull);
+                    }
+                }
+            }
+
             // Redirect stdout/stderr to the log pipe
             if let Some((_, write_end)) = log_pipe {
                 unsafe {
