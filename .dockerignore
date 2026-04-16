@@ -1,0 +1,17 @@
+zig/zig-out/
+zig/.zig-cache/
+rust/target/
+test/qemu/build/
+test/alpine/build*/
+test/alpine/.cache/
+test/void/build*/
+test/void/.cache/
+test/artix/build*/
+test/artix/.cache/
+.git/
+.github/
+*.swp
+*.swo
+*~
+linux-*
+busybox

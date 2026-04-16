@@ -1,0 +1,13 @@
+services:
+  dynamod:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    privileged: true
+    hostname: dynamod-docker
+    tty: true
+    stdin_open: true
+    stop_signal: SIGTERM
+    stop_grace_period: 10s
+    tmpfs:
+      - /tmp

@@ -1,0 +1,15 @@
+[service]
+name = "network"
+supervisor = "early-boot"
+exec = ["/sbin/ip", "link", "set", "lo", "up"]
+type = "oneshot"
+
+[restart]
+policy = "temporary"
+
+[readiness]
+type = "none"
+
+[shutdown]
+stop-signal = "SIGTERM"
+stop-timeout = "5s"

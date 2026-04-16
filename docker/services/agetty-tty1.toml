@@ -1,0 +1,20 @@
+[service]
+name = "agetty-tty1"
+exec = ["/sbin/getty", "tty1", "38400", "linux"]
+type = "simple"
+
+[restart]
+policy = "permanent"
+delay = "1s"
+max-restarts = 10
+max-restart-window = "30s"
+
+[dependencies]
+after = ["bootmisc"]
+
+[readiness]
+type = "none"
+
+[shutdown]
+stop-signal = "SIGHUP"
+stop-timeout = "3s"

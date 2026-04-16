@@ -1,0 +1,19 @@
+[service]
+name = "syslog"
+exec = ["/bin/sh", "-c", "rm -f /dev/log; exec /sbin/syslogd -n -O /var/log/messages"]
+type = "simple"
+
+[restart]
+policy = "permanent"
+delay = "1s"
+
+[readiness]
+type = "none"
+timeout = "10s"
+
+[dependencies]
+after = ["bootmisc"]
+
+[shutdown]
+stop-signal = "SIGTERM"
+stop-timeout = "5s"

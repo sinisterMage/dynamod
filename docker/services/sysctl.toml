@@ -1,0 +1,15 @@
+[service]
+name = "sysctl"
+supervisor = "early-boot"
+exec = ["/sbin/sysctl", "-p"]
+type = "oneshot"
+
+[restart]
+policy = "temporary"
+
+[readiness]
+type = "none"
+
+[shutdown]
+stop-signal = "SIGTERM"
+stop-timeout = "3s"

@@ -1,0 +1,15 @@
+[service]
+name = "hostname"
+supervisor = "early-boot"
+exec = ["/bin/sh", "-c", "read -r h </etc/hostname 2>/dev/null && exec /bin/hostname \"$h\""]
+type = "oneshot"
+
+[restart]
+policy = "temporary"
+
+[readiness]
+type = "none"
+
+[shutdown]
+stop-signal = "SIGTERM"
+stop-timeout = "3s"

@@ -1,0 +1,18 @@
+[service]
+name = "machine-id"
+supervisor = "early-boot"
+exec = ["/sbin/dynamod-init", "--write-machine-id"]
+type = "oneshot"
+
+[restart]
+policy = "temporary"
+
+[dependencies]
+after = ["bootmisc"]
+
+[readiness]
+type = "none"
+
+[shutdown]
+stop-signal = "SIGTERM"
+stop-timeout = "3s"
