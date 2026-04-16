@@ -83,6 +83,24 @@ make rust-sdnotify    # Build libsystemd.so.0
 make install-sdnotify # Install to /usr/lib/
 ```
 
+## Try it in Docker
+
+The fastest way to see dynamod in action — no VM or bootloader changes needed:
+
+```sh
+cd docker
+docker compose up
+```
+
+Then in another terminal:
+
+```sh
+docker exec -it docker-dynamod-1 dynamodctl list
+docker exec -it docker-dynamod-1 dynamodctl tree
+```
+
+See [docs/docker.md](docs/docker.md) for details.
+
 ## Quick start
 
 **1. Define a service:**
@@ -173,6 +191,7 @@ for the full reference.
 - [Architecture](docs/architecture.md) — how the system works, boot sequence,
   IPC protocol, supervisor trees, systemd-mimic layer
 - [Configuration](docs/configuration.md) — every TOML field with defaults and examples
+- [Docker](docs/docker.md) — running dynamod in a Docker container
 - [Contributing](CONTRIBUTING.md) — how to contribute, code style, testing
 
 ## Project structure
@@ -207,6 +226,10 @@ dynamod/
 │   ├── services/          # Service definitions (*.toml)
 │   ├── supervisors/       # Supervisor tree definitions
 │   └── dbus-1/            # D-Bus policy files
+├── docker/
+│   ├── Dockerfile         # Multi-stage build (Ubuntu builder → Alpine runtime)
+│   ├── docker-compose.yml # One-command demo
+│   └── services/          # Docker-adapted service configs
 ├── tools/
 │   └── mkimage.sh         # Bootable disk image builder
 ├── test/
@@ -220,7 +243,8 @@ dynamod/
 │       └── boot-gnome.sh      # GNOME Shell test
 └── docs/
     ├── architecture.md
-    └── configuration.md
+    ├── configuration.md
+    └── docker.md
 ```
 
 ## License

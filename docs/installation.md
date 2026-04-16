@@ -115,9 +115,28 @@ sudo xbps-install -R hostdir/binpkgs dynamod
 ## Setting up dynamod as your init system
 
 **Warning:** Replacing your init system on a running machine can make it
-unbootable. Test in a VM first!
+unbootable. Test in a VM or Docker container first!
 
-### Option 1: QEMU testing (recommended to start)
+### Option 1: Docker (quickest way to try)
+
+No VM or bootloader changes needed — just Docker:
+
+```sh
+cd docker
+docker compose up
+```
+
+Then in another terminal:
+
+```sh
+docker exec -it docker-dynamod-1 dynamodctl list
+docker exec -it docker-dynamod-1 dynamodctl tree
+```
+
+See [docker.md](docker.md) for the full guide, including how to add your own
+services and troubleshooting.
+
+### Option 2: QEMU testing (recommended for full boot testing)
 
 The fastest way to try dynamod:
 
@@ -139,7 +158,7 @@ For disk-based boot (initramfs -> ext4 rootfs):
 sudo test/alpine/boot-disk.sh
 ```
 
-### Option 2: Install into a root filesystem
+### Option 3: Install into a root filesystem
 
 Prepare a root filesystem (ext4 partition, Alpine/Void/Gentoo base install),
 then install dynamod into it:
@@ -161,7 +180,7 @@ sudo mkdir -p /mnt/var/lib/dynamod /mnt/var/log/dynamod
 #   initrd /boot/initramfs.gz
 ```
 
-### Option 3: Boot with initramfs (for real hardware)
+### Option 4: Boot with initramfs (for real hardware)
 
 For a proper boot chain with root device detection:
 
