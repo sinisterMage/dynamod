@@ -1,12 +1,3 @@
-# dynamod build orchestration for `neomake`.
-#
-# Bootstrap once with `./tools/bootstrap-neomake.sh`, then invoke tasks as
-# `neomake run <task>` from the repo root. With no task argument, neomake
-# runs every leaf in the DAG. Common entry points: `all`, `install`, `test`.
-#
-# Override install destination with the standard `DESTDIR=` and `PREFIX=`
-# environment variables (defaults: empty and `/usr`).
-
 $destdir = env("DESTDIR", "")
 $prefix  = env("PREFIX", "/usr")
 
