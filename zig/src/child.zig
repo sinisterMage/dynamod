@@ -17,6 +17,17 @@ init_sock_fd: ?std.posix.fd_t,
 backoff_ms: u32,
 /// Path to svmgr binary.
 svmgr_path: [*:0]const u8,
+/// Wall-clock time (ms since epoch) when svmgr was most recently spawned.
+/// Used by onExit to decide whether an exit counts as a "rapid" failure.
+spawn_time_ms: i64,
+/// Count of consecutive rapid failures. Reset whenever svmgr survives
+/// `svmgr_rapid_failure_uptime_ms` before exiting, or by the emergency
+/// recovery path after an operator intervention.
+rapid_failure_count: u32,
+/// Set by event_loop before sending SIGTERM to svmgr for a deliberate stop
+/// (e.g. SIGUSR2 emergency-shell trigger). Tells onExit not to charge this
+/// exit against the rapid-failure counter.
+intentional_stop: bool,
 
 pub fn create(svmgr_path: [*:0]const u8) Self {
     return Self{
@@ -25,6 +36,9 @@ pub fn create(svmgr_path: [*:0]const u8) Self {
         .init_sock_fd = null,
         .backoff_ms = constants.svmgr_restart_initial_ms,
         .svmgr_path = svmgr_path,
+        .spawn_time_ms = 0,
+        .rapid_failure_count = 0,
+        .intentional_stop = false,
     };
 }
 
@@ -105,14 +119,28 @@ pub fn spawn(self: *Self, klog: ?kmsg) !void {
 
     // Reset backoff on successful spawn
     self.backoff_ms = constants.svmgr_restart_initial_ms;
+    self.spawn_time_ms = std.time.milliTimestamp();
 }
 
-/// Called when svmgr exits. Increases the restart backoff.
-/// Returns the backoff delay in milliseconds before the next restart attempt.
+/// Called when svmgr exits. Increases the restart backoff and updates the
+/// rapid-failure counter. Returns the backoff delay in milliseconds before
+/// the next restart attempt.
 pub fn onExit(self: *Self, klog: ?kmsg) u32 {
     const delay = self.backoff_ms;
 
-    if (klog) |k| k.warn("dynamod-svmgr exited, will restart in {d}ms", .{delay});
+    // Update the rapid-failure counter unless this was a deliberate stop.
+    if (self.intentional_stop) {
+        self.intentional_stop = false;
+    } else if (self.spawn_time_ms != 0) {
+        const uptime_ms = std.time.milliTimestamp() - self.spawn_time_ms;
+        if (uptime_ms < constants.svmgr_rapid_failure_uptime_ms) {
+            self.rapid_failure_count += 1;
+        } else {
+            self.rapid_failure_count = 0;
+        }
+    }
+
+    if (klog) |k| k.warn("dynamod-svmgr exited, will restart in {d}ms (rapid_failures={d})", .{ delay, self.rapid_failure_count });
 
     // Exponential backoff
     self.backoff_ms = @min(self.backoff_ms * 2, constants.svmgr_restart_max_ms);
@@ -125,6 +153,23 @@ pub fn onExit(self: *Self, klog: ?kmsg) u32 {
     self.init_sock_fd = null;
 
     return delay;
+}
+
+/// Predicate: should we drop to an emergency shell instead of restarting?
+pub fn isInCrashLoop(self: Self) bool {
+    return self.rapid_failure_count >= constants.svmgr_rapid_failure_threshold;
+}
+
+/// Reset failure tracking after an operator has intervened.
+pub fn resetFailureCounter(self: *Self) void {
+    self.rapid_failure_count = 0;
+    self.backoff_ms = constants.svmgr_restart_initial_ms;
+}
+
+/// Mark the next svmgr exit as intentional (e.g. SIGUSR2 emergency trigger)
+/// so it does not count against the rapid-failure counter.
+pub fn markStopping(self: *Self) void {
+    self.intentional_stop = true;
 }
 
 /// Get the pidfd for epoll registration.

@@ -45,7 +45,7 @@ fi
 for bin in "$ZIG_OUT/dynamod-init" "$CARGO_OUT/dynamod-svmgr" \
            "$CARGO_OUT/dynamodctl" "$CARGO_OUT/dynamod-logd"; do
     if [ ! -f "$bin" ]; then
-        echo "ERROR: $bin not found. Run 'make' first."
+        echo "ERROR: $bin not found. Run 'neomake run all' first."
         exit 1
     fi
 done

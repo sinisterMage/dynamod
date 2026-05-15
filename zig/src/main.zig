@@ -89,14 +89,22 @@ pub fn main() noreturn {
         shutdown_mod.execute(.halt, klog);
     };
 
-    // Phase 2: Spawn the service manager
-    var svmgr = child.create(constants.svmgr_path);
-    svmgr.spawn(klog) catch {
-        if (klog) |k| k.emerg("failed to spawn dynamod-svmgr", .{});
-        shutdown_mod.execute(.halt, klog);
-    };
+    // Re-read /proc/cmdline now that we're in the real root, to check for
+    // dynamod.emergency. The initramfs read happens before switch_root and
+    // doesn't carry over to this exec.
+    const cl = cmdline_mod.Cmdline.read(klog);
+    const emergency_boot = cl.isEmergency();
 
-    if (klog) |k| k.info("service manager launched, entering event loop", .{});
+    // Phase 2: Spawn the service manager (skipped on emergency boot —
+    // the event loop will spawn it after the emergency shell exits).
+    var svmgr = child.create(constants.svmgr_path);
+    if (!emergency_boot) {
+        svmgr.spawn(klog) catch {
+            if (klog) |k| k.emerg("failed to spawn dynamod-svmgr", .{});
+            shutdown_mod.execute(.halt, klog);
+        };
+        if (klog) |k| k.info("service manager launched, entering event loop", .{});
+    }
 
     // Phase 3: Enter main event loop
     var loop = event_loop.init(sig, &svmgr, klog) catch {
@@ -104,9 +112,15 @@ pub fn main() noreturn {
         shutdown_mod.execute(.halt, klog);
     };
 
-    loop.registerSvmgr() catch {
-        if (klog) |k| k.warn("failed to register svmgr with epoll", .{});
-    };
+    if (emergency_boot) {
+        // Run the emergency shell first; the helper then spawns svmgr in
+        // post-emergency mode (one retry, then reboot if it crashes).
+        loop.enterEmergencyBoot();
+    } else {
+        loop.registerSvmgr() catch {
+            if (klog) |k| k.warn("failed to register svmgr with epoll", .{});
+        };
+    }
 
     loop.run();
 }

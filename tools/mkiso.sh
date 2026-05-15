@@ -11,7 +11,7 @@
 #
 # Prerequisites:
 #   - mksquashfs (squashfs-tools), xorriso, mount, losetup (util-linux)
-#   - Run `make` and `sudo tools/mkimage.sh [build-dir]` first
+#   - Run `neomake run all` and `sudo tools/mkimage.sh [build-dir]` first
 #
 # QEMU example (kernel and initrd outside the ISO; ISO only carries squashfs):
 #   qemu-system-x86_64 -kernel /boot/vmlinuz-xxx -initrd BUILD_DIR/initramfs.gz \

@@ -10,6 +10,7 @@ everything you need to get started.
 - **Zig 0.15+** — for dynamod-init (the PID 1)
 - **Rust (2024 edition)** — for the service manager and tools
 - **Linux kernel headers** — dynamod uses raw Linux syscalls
+- **[neomake](https://github.com/sinisterMage/neomake)** — build orchestrator
 - **QEMU** — for integration testing (optional but very helpful)
 
 ### Building
@@ -17,8 +18,8 @@ everything you need to get started.
 ```sh
 git clone https://github.com/sinisterMage/dynamod.git
 cd dynamod
-make          # Builds both Zig and Rust components
-make test     # Runs unit tests
+neomake run all    # Builds both Zig and Rust components
+neomake run test   # Runs unit tests
 ```
 
 The Rust workspace is configured to cross-compile to `x86_64-unknown-linux-musl`
@@ -31,15 +32,15 @@ rustup target add x86_64-unknown-linux-musl
 ### Running tests
 
 ```sh
-make test              # Unit tests (Zig + Rust)
-make test-qemu         # Minimal QEMU smoke test
-make test-alpine       # Full Alpine integration test
+neomake run test         # Unit tests (Zig + Rust)
+neomake run test-qemu    # Minimal QEMU smoke test
+neomake run test-alpine  # Full Alpine integration test
 ```
 
 For desktop and D-Bus tests (require root for chroot/mount):
 
 ```sh
-sudo make test-dbus               # D-Bus interface smoke test
+sudo neomake run test-dbus       # D-Bus interface smoke test
 sudo test/alpine/boot-disk.sh    # Initramfs-to-rootfs transition
 sudo test/alpine/boot-wayland.sh # Sway Wayland compositor
 sudo test/alpine/boot-gnome.sh   # GNOME Shell desktop
@@ -133,7 +134,7 @@ fix busctl -> dbus-send in Alpine test scripts
 
 1. Fork the repo and create a branch from `main`
 2. Make your changes
-3. Run `make test` and make sure everything passes
+3. Run `neomake run test` and make sure everything passes
 4. If you changed Zig code, run `cd zig && zig build test`
 5. If you changed Rust code, run `cd rust && cargo test --workspace`
 6. Open a PR with a clear description of what you changed and why

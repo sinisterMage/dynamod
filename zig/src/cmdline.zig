@@ -89,6 +89,16 @@ pub const Cmdline = struct {
         return std.fmt.parseInt(u32, val, 10) catch 0;
     }
 
+    /// True when the operator asked for the emergency shell at boot
+    /// (`dynamod.emergency` bare flag, or `=1`/`true`/`yes`).
+    pub fn isEmergency(self: *const Cmdline) bool {
+        if (self.hasFlag("dynamod.emergency")) return true;
+        const v = self.getParam("dynamod.emergency") orelse return false;
+        return std.mem.eql(u8, v, "1") or
+            std.mem.eql(u8, v, "true") or
+            std.mem.eql(u8, v, "yes");
+    }
+
     /// True when dynamod ISO/live pipeline is enabled (dynamod.live flag or =1/true/yes).
     pub fn isLive(self: *const Cmdline) bool {
         if (self.hasFlag("dynamod.live")) return true;
@@ -195,6 +205,30 @@ test "parse rootdelay" {
     cl.len = input.len;
 
     try std.testing.expect(cl.getRootDelay() == 5);
+}
+
+test "parse dynamod emergency flag" {
+    var cl = Cmdline{};
+    const input = "console=ttyS0 dynamod.emergency";
+    @memcpy(cl.buf[0..input.len], input);
+    cl.len = input.len;
+    try std.testing.expect(cl.isEmergency());
+}
+
+test "parse dynamod emergency =1" {
+    var cl = Cmdline{};
+    const input = "dynamod.emergency=1";
+    @memcpy(cl.buf[0..input.len], input);
+    cl.len = input.len;
+    try std.testing.expect(cl.isEmergency());
+}
+
+test "no emergency by default" {
+    var cl = Cmdline{};
+    const input = "root=/dev/vda1";
+    @memcpy(cl.buf[0..input.len], input);
+    cl.len = input.len;
+    try std.testing.expect(!cl.isEmergency());
 }
 
 test "parse dynamod live cmdline" {

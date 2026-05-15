@@ -65,7 +65,7 @@ for bin in "$ZIG_OUT/dynamod-init" \
            "$CARGO_OUT/dynamod-sd1bridge" \
            "$CARGO_OUT/dynamod-hostnamed"; do
     if [ ! -f "$bin" ]; then
-        echo "ERROR: $bin not found. Run 'make' or 'cargo build --release' first."
+        echo "ERROR: $bin not found. Run 'neomake run all' or 'cargo build --release' first."
         exit 1
     fi
 done

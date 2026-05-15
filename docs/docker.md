@@ -164,7 +164,7 @@ cgroup namespace configuration.
 The image uses a multi-stage build:
 
 **Stage 1 (builder):** Ubuntu 24.04 with Zig 0.15.2 and Rust (musl target).
-Runs `make all` to produce statically-linked binaries.
+Runs `neomake run all` to produce statically-linked binaries.
 
 **Stage 2 (runtime):** Alpine 3.21 with only `iproute2` added (for the
 `ip link set lo up` command in the network service). All dynamod binaries

@@ -12,7 +12,7 @@ dynamod can run as the primary init system or be tested in a QEMU VM.
 | Zig | 0.15 | Building dynamod-init (PID 1) |
 | Rust | 2024 edition | Building service manager and tools |
 | musl target | — | Static linking (`rustup target add x86_64-unknown-linux-musl`) |
-| make | any | Build orchestration |
+| [neomake](https://github.com/sinisterMage/neomake) | any | Build orchestration |
 
 Optional for testing:
 
@@ -27,7 +27,7 @@ Optional for testing:
 ```sh
 git clone https://github.com/sinisterMage/dynamod.git
 cd dynamod
-make
+neomake run all
 ```
 
 This produces:
@@ -47,14 +47,14 @@ All binaries are statically linked and have no runtime dependencies.
 ### Installing
 
 ```sh
-sudo make install           # Installs to /usr/
-sudo make install-alpine    # Also installs all service configs
+sudo neomake run install          # Installs to /usr/
+sudo neomake run install-alpine   # Also installs all service configs
 ```
 
 Or install to a custom prefix:
 
 ```sh
-sudo make install DESTDIR=/path/to/rootfs PREFIX=/usr
+sudo DESTDIR=/path/to/rootfs PREFIX=/usr neomake run install
 ```
 
 ## Distro packages
@@ -141,8 +141,8 @@ services and troubleshooting.
 The fastest way to try dynamod:
 
 ```sh
-make
-make test-alpine     # Boots Alpine + dynamod in QEMU, serial console
+neomake run all
+neomake run test-alpine   # Boots Alpine + dynamod in QEMU, serial console
 ```
 
 For graphical testing:
@@ -168,8 +168,8 @@ then install dynamod into it:
 sudo mount /dev/sdX1 /mnt
 
 # Install dynamod
-sudo make install DESTDIR=/mnt PREFIX=/usr
-sudo make install-alpine DESTDIR=/mnt PREFIX=/usr
+sudo DESTDIR=/mnt PREFIX=/usr neomake run install
+sudo DESTDIR=/mnt PREFIX=/usr neomake run install-alpine
 
 # Create required directories
 sudo mkdir -p /mnt/var/lib/dynamod /mnt/var/log/dynamod

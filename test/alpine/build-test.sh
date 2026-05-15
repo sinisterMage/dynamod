@@ -7,7 +7,7 @@
 #   - A Linux kernel bzImage (build or provide via KERNEL= env var)
 #
 # Usage:
-#   make test-alpine
+#   neomake run test-alpine
 #   # or directly:
 #   KERNEL=/path/to/bzImage test/alpine/build-test.sh
 
@@ -63,7 +63,7 @@ for bin in "$ZIG_OUT/dynamod-init" \
            "$CARGO_OUT/dynamodctl" \
            "$CARGO_OUT/dynamod-logd"; do
     if [ ! -f "$bin" ]; then
-        echo "ERROR: $bin not found. Run 'make' first."
+        echo "ERROR: $bin not found. Run 'neomake run all' first."
         exit 1
     fi
 done

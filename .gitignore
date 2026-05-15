@@ -1,7 +1,8 @@
 # Zig
 zig/zig-out/
 zig/.zig-cache/
-
+neomake/
+.neomake/
 # Rust
 rust/target/
 

@@ -64,23 +64,28 @@ Plus the **systemd-mimic** layer for desktop compatibility:
   and timeouts, SIGKILL escalation, filesystem sync
 - **Crash resilience** — the Zig PID 1 uses no heap allocations and auto-restarts
   the service manager with exponential backoff if it crashes
+- **Emergency shell** — if the service manager hits a crash loop, init drops to
+  an interactive shell on `/dev/console` so the operator can recover the system.
+  Trigger explicitly with `dynamod.emergency=1` on the kernel cmdline or
+  `kill -USR2 1`
 
 ## Building
 
-Requires Zig 0.15+ and Rust (2024 edition).
+Requires Zig 0.15+, Rust (2024 edition), and
+[`neomake`](https://github.com/sinisterMage/neomake) for build orchestration.
 
 ```sh
-make              # Build dynamod-init (Zig) + all Rust binaries
-make install      # Install to /usr (or DESTDIR=... PREFIX=...)
-make test         # Run unit tests (Zig + Rust)
+neomake run all       # Build dynamod-init (Zig) + all Rust binaries
+neomake run install   # Install to /usr (or DESTDIR=... PREFIX=...)
+neomake run test      # Run unit tests (Zig + Rust)
 ```
 
 The systemd shim library (`libsystemd.so`) is built separately since it needs
 the glibc target:
 
 ```sh
-make rust-sdnotify    # Build libsystemd.so.0
-make install-sdnotify # Install to /usr/lib/
+neomake run rust-sdnotify     # Build libsystemd.so.0
+neomake run install-sdnotify  # Install to /usr/lib/
 ```
 
 ## Try it in Docker
@@ -169,10 +174,10 @@ sudo test/alpine/boot-disk.sh   # Boots it in QEMU
 ## Testing
 
 ```sh
-make test                          # Unit tests (Zig + Rust)
-make test-qemu                     # Minimal QEMU boot smoke test
-make test-alpine                   # Full Alpine integration test
-sudo make test-dbus                # D-Bus interface smoke test (logind, systemd1, hostname1)
+neomake run test                   # Unit tests (Zig + Rust)
+neomake run test-qemu              # Minimal QEMU boot smoke test
+neomake run test-alpine            # Full Alpine integration test
+sudo neomake run test-dbus         # D-Bus interface smoke test (logind, systemd1, hostname1)
 sudo test/alpine/boot-disk.sh     # Initramfs-to-rootfs transition test
 sudo test/alpine/boot-wayland.sh  # Sway Wayland compositor test
 sudo test/alpine/boot-gnome.sh    # GNOME Shell desktop test

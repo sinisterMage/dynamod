@@ -30,6 +30,22 @@ pub const svmgr_restart_initial_ms: u32 = 500;
 /// Svmgr restart backoff: maximum delay in milliseconds.
 pub const svmgr_restart_max_ms: u32 = 30_000;
 
+/// Console device opened by the emergency shell for stdin/stdout/stderr.
+pub const console_path: [*:0]const u8 = "/dev/console";
+
+/// An svmgr exit within this many milliseconds of its spawn counts as a
+/// "rapid" failure for the purposes of crash-loop detection.
+pub const svmgr_rapid_failure_uptime_ms: i64 = 30_000;
+
+/// Number of consecutive rapid failures before dynamod-init drops to an
+/// emergency shell instead of looping on exponential-backoff restarts.
+pub const svmgr_rapid_failure_threshold: u32 = 5;
+
+/// After an emergency shell exits, svmgr is given this long to prove it's
+/// stable. A crash within this window triggers a reboot — the operator's
+/// fix didn't hold, and continuing to restart is unlikely to help.
+pub const svmgr_post_emergency_grace_ms: i64 = 60_000;
+
 // --- Initramfs / switch_root constants ---
 
 /// Mount point for the real root filesystem during switch_root.

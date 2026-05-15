@@ -6,7 +6,7 @@
 
 <!-- How did you test this? Which tests pass? -->
 
-- [ ] `make test` passes
+- [ ] `neomake run test` passes
 - [ ] Relevant QEMU test passes (if applicable)
 - [ ] New tests added (if applicable)
 

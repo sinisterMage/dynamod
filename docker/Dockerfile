@@ -20,7 +20,9 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 COPY . /src
 WORKDIR /src
 
-RUN . "$HOME/.cargo/env" && make all
+RUN . "$HOME/.cargo/env" \
+    && cargo install --path neomake/neomake --root /usr/local \
+    && neomake run all
 
 # Stage 2: Alpine runtime with dynamod as PID 1
 FROM alpine:3.21

@@ -1,0 +1,100 @@
+# dynamod build orchestration for `neomake`.
+#
+# Bootstrap once with `./tools/bootstrap-neomake.sh`, then invoke tasks as
+# `neomake run <task>` from the repo root. With no task argument, neomake
+# runs every leaf in the DAG. Common entry points: `all`, `install`, `test`.
+#
+# Override install destination with the standard `DESTDIR=` and `PREFIX=`
+# environment variables (defaults: empty and `/usr`).
+
+$destdir = env("DESTDIR", "")
+$prefix  = env("PREFIX", "/usr")
+
+$zig_sources    = glob("zig/src/**/*.zig")
+$zig_build_zig  = glob("zig/build.zig*")
+$rust_sources   = glob("rust/**/*.rs")
+$rust_manifests = glob("rust/**/Cargo.toml")
+
+# --- Build ---------------------------------------------------------------
+
+[tasks.zig]
+command = "cd zig && zig build"
+inputs  = ${zig_sources} + ${zig_build_zig}
+outputs = ["zig/zig-out/bin/dynamod-init"]
+
+[tasks.rust]
+command = "cd rust && cargo build --release"
+inputs  = ${rust_sources} + ${rust_manifests}
+
+# Built separately because libsystemd.so needs the glibc target, not musl.
+[tasks.rust-sdnotify]
+command = "cd rust/dynamod-sdnotify && cargo build --release --target x86_64-unknown-linux-gnu"
+inputs  = glob("rust/dynamod-sdnotify/**/*.rs") + glob("rust/dynamod-sdnotify/Cargo.toml")
+
+[tasks.all]
+deps    = ["zig", "rust"]
+command = "true"
+
+# --- Clean ---------------------------------------------------------------
+
+[tasks.clean]
+command = "rm -rf zig/zig-out zig/.zig-cache && cd rust && cargo clean"
+
+# --- Install -------------------------------------------------------------
+#
+# All install logic lives in tools/install*.sh so multi-line shell stays
+# out of the TOMLX file (which is a single-line-per-value language).
+
+[tasks.install]
+deps    = ["all"]
+command = "tools/install.sh"
+inputs  = ["tools/install.sh", "config/supervisors/root.toml"] + glob("config/dbus-1/*.conf")
+
+[tasks.install-sdnotify]
+deps    = ["rust-sdnotify"]
+command = "tools/install-sdnotify.sh"
+inputs  = ["tools/install-sdnotify.sh"]
+
+[tasks.install-alpine]
+deps    = ["install"]
+command = "tools/install-alpine.sh"
+inputs  = ["tools/install-alpine.sh", "config/supervisors/early-boot.toml", "config/supervisors/desktop.toml"] + glob("config/services/*.toml")
+
+# --- Test ----------------------------------------------------------------
+
+[tasks.test]
+deps    = ["test-zig", "test-rust"]
+command = "true"
+
+[tasks.test-zig]
+command = "cd zig && zig build test"
+inputs  = ${zig_sources} + ${zig_build_zig}
+
+[tasks.test-rust]
+command = "cd rust && cargo test --workspace"
+inputs  = ${rust_sources} + ${rust_manifests}
+
+[tasks.test-qemu]
+deps    = ["all"]
+command = "test/qemu/run-vm.sh"
+
+[tasks.test-alpine]
+deps    = ["all"]
+command = "test/alpine/build-test.sh"
+
+[tasks.test-dbus]
+deps    = ["all"]
+command = "test/alpine/test-dbus.sh"
+
+[tasks.test-disk]
+deps    = ["all"]
+command = "test/alpine/boot-disk.sh"
+
+[tasks.test-void]
+deps    = ["all"]
+command = "test/void/boot-full.sh"
+
+# --- Formatting ----------------------------------------------------------
+
+[tasks.fmt]
+command = "cd rust && cargo fmt --all"

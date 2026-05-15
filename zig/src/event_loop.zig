@@ -8,6 +8,8 @@ const reaper = @import("reaper.zig");
 const child = @import("child.zig");
 const shutdown = @import("shutdown.zig");
 const ipc = @import("ipc.zig");
+const emergency = @import("emergency.zig");
+const constants = @import("constants.zig");
 
 const Self = @This();
 
@@ -24,6 +26,14 @@ svmgr: *child,
 klog: ?kmsg,
 shutdown_requested: ?shutdown.ShutdownKind,
 ipc_buf: ipc.ReadBuffer,
+/// Set once after the emergency shell exits and svmgr has been respawned.
+/// A subsequent svmgr exit inside the post-emergency grace window triggers
+/// a reboot — the operator's fix did not hold.
+post_emergency_armed: bool,
+/// Set when the operator triggers an emergency shell via SIGUSR2 and we
+/// have asked the currently-running svmgr to terminate. handleSvmgrExit
+/// observes this flag and enters emergency mode instead of restarting.
+pending_emergency: bool,
 
 pub fn init(sig_handler: signal, svmgr_child: *child, klog_writer: ?kmsg) !Self {
     const epfd = linux.epoll_create1(linux.EPOLL.CLOEXEC);
@@ -37,6 +47,8 @@ pub fn init(sig_handler: signal, svmgr_child: *child, klog_writer: ?kmsg) !Self 
         .klog = klog_writer,
         .shutdown_requested = null,
         .ipc_buf = .{},
+        .post_emergency_armed = false,
+        .pending_emergency = false,
     };
 
     // Register signalfd
@@ -166,7 +178,17 @@ fn handleSignals(self: *Self) void {
                 self.shutdown_requested = .reboot;
             },
             .user2 => {
-                if (self.klog) |k| k.info("received SIGUSR2", .{});
+                if (self.klog) |k| k.warn("received SIGUSR2 — operator requested emergency shell", .{});
+                if (self.svmgr.pid) |pid| {
+                    // Ask svmgr to terminate; the emergency shell will be
+                    // started from handleSvmgrExit when SIGCHLD fires.
+                    self.svmgr.markStopping();
+                    self.pending_emergency = true;
+                    _ = linux.kill(pid, linux.SIG.TERM);
+                } else {
+                    // svmgr is already dead — run the shell immediately.
+                    self.enterEmergencyMode();
+                }
             },
             .unknown => {},
         }
@@ -176,14 +198,44 @@ fn handleSignals(self: *Self) void {
 fn handleSvmgrExit(self: *Self) void {
     if (self.klog) |k| k.warn("dynamod-svmgr process exited", .{});
 
-    // Unregister old fds, handle exit, and restart
+    // Unregister old fds, handle exit
     self.unregisterSvmgr();
     const delay_ms = self.svmgr.onExit(self.klog);
 
     // Reset IPC buffer for new connection
     self.ipc_buf.len = 0;
 
-    // Sleep for backoff delay then restart
+    // Operator triggered an emergency via SIGUSR2 and we asked svmgr to
+    // terminate — enter the emergency shell now instead of restarting.
+    if (self.pending_emergency) {
+        self.pending_emergency = false;
+        self.enterEmergencyMode();
+        return;
+    }
+
+    // svmgr crashed after a recent emergency recovery. If it failed
+    // quickly, the operator's fix didn't hold — reboot. If it survived
+    // the grace window, clear the flag and resume normal restarts.
+    if (self.post_emergency_armed) {
+        const uptime_ms = std.time.milliTimestamp() - self.svmgr.spawn_time_ms;
+        if (uptime_ms < constants.svmgr_post_emergency_grace_ms) {
+            if (self.klog) |k| k.emerg("svmgr died {d}ms after emergency recovery — rebooting", .{uptime_ms});
+            self.shutdown_requested = .reboot;
+            return;
+        }
+        self.post_emergency_armed = false;
+        if (self.klog) |k| k.info("svmgr survived post-emergency grace window; resuming normal restart", .{});
+    }
+
+    // Crash loop: fall back to the emergency shell so the operator can
+    // recover the system instead of letting init spin forever.
+    if (self.svmgr.isInCrashLoop()) {
+        if (self.klog) |k| k.emerg("svmgr crash loop detected ({d} rapid failures) — entering emergency shell", .{self.svmgr.rapid_failure_count});
+        self.enterEmergencyMode();
+        return;
+    }
+
+    // Normal exponential-backoff restart.
     const ts = linux.timespec{
         .sec = @intCast(delay_ms / 1000),
         .nsec = @intCast((@as(u64, delay_ms) % 1000) * 1_000_000),
@@ -198,6 +250,44 @@ fn handleSvmgrExit(self: *Self) void {
     self.registerSvmgr() catch |e| {
         if (self.klog) |k| k.err("failed to register svmgr fds: {s}", .{@errorName(e)});
     };
+}
+
+/// Run an emergency shell on /dev/console, then respawn svmgr once.
+/// If the respawn fails (or svmgr crashes again inside the grace window
+/// per handleSvmgrExit), the system reboots.
+///
+/// Callable from three trigger paths: crash-loop fallback, SIGUSR2, and
+/// `dynamod.emergency` on the kernel command line (via enterEmergencyBoot).
+fn enterEmergencyMode(self: *Self) void {
+    // The emergency shell blocks init. svmgr must already be stopped at
+    // this point — pending_emergency / crash-loop paths handle that, and
+    // the cmdline path never spawned svmgr in the first place.
+    _ = emergency.runShell(self.klog);
+
+    if (self.klog) |k| k.warn("emergency shell exited; respawning svmgr (post-emergency mode)", .{});
+
+    // The operator presumably fixed whatever was wrong — give svmgr a
+    // clean slate, but arm the post-emergency check so a quick re-crash
+    // forces a reboot rather than another emergency loop.
+    self.svmgr.resetFailureCounter();
+    self.post_emergency_armed = true;
+
+    self.svmgr.spawn(self.klog) catch |e| {
+        if (self.klog) |k| k.emerg("post-emergency svmgr spawn failed: {s} — rebooting", .{@errorName(e)});
+        self.shutdown_requested = .reboot;
+        return;
+    };
+    self.registerSvmgr() catch |e| {
+        if (self.klog) |k| k.warn("failed to register svmgr fds post-emergency: {s}", .{@errorName(e)});
+    };
+}
+
+/// Entry point for `dynamod.emergency=1` on the kernel command line.
+/// Called by main.zig before the event loop runs, when svmgr has not yet
+/// been spawned.
+pub fn enterEmergencyBoot(self: *Self) void {
+    if (self.klog) |k| k.warn("dynamod.emergency set on cmdline — booting into emergency shell", .{});
+    self.enterEmergencyMode();
 }
 
 fn handleSvmgrMessage(self: *Self) void {
