@@ -16,7 +16,7 @@ timeout = "10s"
 
 [dependencies]
 requires = ["dbus"]
-after = ["dbus"]
+after = ["dbus", "udev-coldplug"]
 
 [shutdown]
 stop-signal = "SIGTERM"

@@ -13,7 +13,7 @@ use zbus::{fdo, interface, zvariant};
 
 use crate::device;
 use crate::manager;
-use crate::state::{LoginState, SessionState};
+use crate::state::LoginState;
 
 pub struct SessionInterface {
     pub session_id: String,
@@ -393,7 +393,14 @@ impl SessionInterface {
 
     #[zbus(property)]
     async fn scope(&self) -> fdo::Result<String> {
-        Ok(format!("session-{}.scope", self.session_id))
+        let st = self.state.lock().await;
+        let session = st.sessions.get(&self.session_id).ok_or_else(|| {
+            fdo::Error::Failed("session not found".to_string())
+        })?;
+        Ok(crate::cgroup::session_scope_relative(
+            session.uid,
+            &self.session_id,
+        ))
     }
 
     #[zbus(property)]

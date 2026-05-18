@@ -5,10 +5,15 @@
 /// environments to manage device access and sessions without systemd.
 ///
 /// Clean-room implementation — no systemd source code was used.
+mod acpi;
 mod auth;
+mod cgroup;
+mod config;
 mod device;
 mod inhibitor;
 mod manager;
+mod power;
+mod runtime_dir;
 mod seat;
 mod session;
 mod state;
@@ -17,7 +22,7 @@ mod user;
 mod vtswitch;
 
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use state::LoginState;
 
@@ -30,8 +35,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("dynamod-logind starting");
 
+    // Load /etc/dynamod/logind.conf (uses defaults on miss).
+    let config = Arc::new(RwLock::new(config::Config::load()));
+
     // Initialize login state with seat0
-    let login_state = Arc::new(Mutex::new(LoginState::new()));
+    let login_state = Arc::new(Mutex::new(LoginState::with_config(Arc::clone(&config))));
     {
         let mut st = login_state.lock().await;
         st.create_seat0();
@@ -51,6 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mgr = manager::Manager {
         state: Arc::clone(&login_state),
         object_server: Arc::clone(&object_server),
+        connection: connection.clone(),
     };
 
     // Register the seat0 D-Bus object
@@ -97,12 +106,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Reload config on SIGHUP.
+    let cfg_for_reload = Arc::clone(&config);
+    tokio::spawn(async move {
+        let mut hup = match tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::hangup(),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("cannot install SIGHUP handler: {e}");
+                return;
+            }
+        };
+        while hup.recv().await.is_some() {
+            let new_cfg = config::Config::load();
+            *cfg_for_reload.write().await = new_cfg;
+            tracing::info!("reloaded logind.conf");
+        }
+    });
+
+    // Start the ACPI event source (lid / power-button / sleep-button).
+    let emit_sleep = prepare_for_sleep_emitter(connection.clone());
+    let emit_shutdown = prepare_for_shutdown_emitter(connection.clone());
+    acpi::spawn(Arc::clone(&login_state), emit_sleep, emit_shutdown);
+
     tracing::info!("dynamod-logind ready, waiting for D-Bus requests");
 
     // Run forever, processing D-Bus messages
     std::future::pending::<()>().await;
 
     Ok(())
+}
+
+fn prepare_for_sleep_emitter(conn: zbus::Connection) -> acpi::PrepareEmitter {
+    Arc::new(move |active: bool| -> zbus::Result<()> {
+        let conn = conn.clone();
+        tokio::spawn(async move {
+            let _ = conn
+                .emit_signal(
+                    None::<&str>,
+                    "/org/freedesktop/login1",
+                    "org.freedesktop.login1.Manager",
+                    "PrepareForSleep",
+                    &(active,),
+                )
+                .await;
+        });
+        Ok(())
+    })
+}
+
+fn prepare_for_shutdown_emitter(conn: zbus::Connection) -> acpi::PrepareEmitter {
+    Arc::new(move |active: bool| -> zbus::Result<()> {
+        let conn = conn.clone();
+        tokio::spawn(async move {
+            let _ = conn
+                .emit_signal(
+                    None::<&str>,
+                    "/org/freedesktop/login1",
+                    "org.freedesktop.login1.Manager",
+                    "PrepareForShutdown",
+                    &(active,),
+                )
+                .await;
+        });
+        Ok(())
+    })
 }
 
 /// Detect if the system has graphical capability by checking for DRM devices.

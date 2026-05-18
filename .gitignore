@@ -5,7 +5,7 @@ neomake/
 .neomake/
 # Rust
 rust/target/
-
+rust/pam_dynamod_logind/target/
 # QEMU test artifacts
 test/qemu/build/
 test/alpine/build/

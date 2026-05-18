@@ -9,14 +9,20 @@ use zbus::object_server::SignalEmitter;
 use zbus::{fdo, interface, zvariant};
 
 use crate::auth;
+use crate::cgroup;
+use crate::device;
 use crate::inhibitor;
-use crate::state::{self, LoginState, SeatId, SessionId};
-use crate::svmgr_client;
+use crate::power::{self, ShutdownKind as PowerShutdownKind, SleepKind};
+use crate::runtime_dir;
+use crate::state::{self, LoginState, SeatId};
 
 /// The Manager object lives at /org/freedesktop/login1 on the system bus.
 pub struct Manager {
     pub state: Arc<Mutex<LoginState>>,
     pub object_server: Arc<Mutex<Option<zbus::ObjectServer>>>,
+    /// System-bus connection, used to resolve caller credentials and to emit
+    /// `PrepareForSleep` / `PrepareForShutdown` from background tasks.
+    pub connection: zbus::Connection,
 }
 
 #[interface(name = "org.freedesktop.login1.Manager")]
@@ -67,8 +73,15 @@ impl Manager {
             )));
         };
 
-        // Look up user name from uid
-        let user_name = get_username(uid).unwrap_or_else(|| format!("uid{uid}"));
+        // Look up user name + gid from uid via /etc/passwd.
+        let (user_name, gid) = get_user_info(uid)
+            .unwrap_or_else(|| (format!("uid{uid}"), uid));
+
+        // If we have a pending cleanup for this user's runtime dir, cancel it
+        // — they're logging back in before the grace period expired.
+        if let Some(handle) = st.pending_user_cleanups.remove(&uid) {
+            handle.abort();
+        }
 
         let id = st.create_session(
             uid,
@@ -105,6 +118,23 @@ impl Manager {
 
         let obj_path = session_object_path(&id);
         let runtime_path = format!("/run/user/{uid}");
+
+        // Read tmpfs size from config under the same lock acquisition as the
+        // session was registered, then drop the lock before doing I/O.
+        let runtime_size = st.config.read().await.runtime_directory_size.clone();
+        let is_active = st.sessions.get(&id).map_or(false, |s| s.active);
+        drop(st);
+
+        // /run/user/$UID, cgroup placement, device ACL — all best-effort.
+        if let Err(e) = runtime_dir::ensure(uid, gid, &runtime_size) {
+            tracing::warn!("create_session: runtime_dir::ensure({uid}) failed: {e}");
+        }
+        cgroup::place_leader(uid, &id, pid);
+        if is_active {
+            if let Some(ref s) = seat {
+                device::apply_session_acl(s, uid);
+            }
+        }
 
         // Register session D-Bus object
         if let Some(ref server) = *self.object_server.lock().await {
@@ -267,8 +297,7 @@ impl Manager {
         mode: &str,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<zvariant::OwnedFd> {
-        let uid = get_caller_uid(&header);
-        let pid = get_caller_pid(&header);
+        let (uid, pid) = caller_credentials(&self.connection, &header).await;
         let cookie = state::next_inhibitor_cookie();
 
         let (inh, client_fd) = inhibitor::create_inhibitor(
@@ -314,15 +343,13 @@ impl Manager {
 
     /// Release a session.
     async fn release_session(&self, session_id: &str) -> fdo::Result<()> {
-        let mut st = self.state.lock().await;
-        if st.sessions.contains_key(session_id) {
-            st.remove_session(session_id);
-            Ok(())
-        } else {
-            Err(fdo::Error::Failed(format!(
+        if !self.state.lock().await.sessions.contains_key(session_id) {
+            return Err(fdo::Error::Failed(format!(
                 "no session '{session_id}'"
-            )))
+            )));
         }
+        finalize_session_removal(&self.state, session_id).await;
+        Ok(())
     }
 
     /// Activate a session.
@@ -333,7 +360,9 @@ impl Manager {
                 "no session '{session_id}'"
             )));
         }
-        st.activate_session(session_id);
+        let prev_active = activate_with_acl_handover(&mut st, session_id);
+        drop(st);
+        run_acl_handover(prev_active);
         Ok(())
     }
 
@@ -352,63 +381,85 @@ impl Manager {
                 "session '{session_id}' is not on seat '{seat_id}'"
             )));
         }
-        st.activate_session(session_id);
+        let prev_active = activate_with_acl_handover(&mut st, session_id);
+        drop(st);
+        run_acl_handover(prev_active);
         Ok(())
     }
 
     /// Terminate a session (kill all its processes).
     async fn terminate_session(&self, session_id: &str) -> fdo::Result<()> {
-        let mut st = self.state.lock().await;
-        let session = st.sessions.get(session_id).ok_or_else(|| {
-            fdo::Error::Failed(format!("no session '{session_id}'"))
-        })?;
-        // Kill the session leader
-        let pid = session.leader_pid;
+        let pid = {
+            let st = self.state.lock().await;
+            st.sessions
+                .get(session_id)
+                .map(|s| s.leader_pid)
+                .ok_or_else(|| {
+                    fdo::Error::Failed(format!("no session '{session_id}'"))
+                })?
+        };
         let _ = nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(pid as i32),
             nix::sys::signal::Signal::SIGTERM,
         );
-        st.remove_session(session_id);
+        finalize_session_removal(&self.state, session_id).await;
         Ok(())
     }
 
     /// Terminate a user's sessions.
     async fn terminate_user(&self, uid: u32) -> fdo::Result<()> {
-        let mut st = self.state.lock().await;
-        let session_ids: Vec<String> = st
-            .users
-            .get(&uid)
-            .map(|u| u.sessions.clone())
-            .unwrap_or_default();
+        let session_ids: Vec<String> = {
+            let st = self.state.lock().await;
+            st.users
+                .get(&uid)
+                .map(|u| u.sessions.clone())
+                .unwrap_or_default()
+        };
         for sid in &session_ids {
-            if let Some(session) = st.sessions.get(sid) {
+            let pid_opt = self
+                .state
+                .lock()
+                .await
+                .sessions
+                .get(sid)
+                .map(|s| s.leader_pid);
+            if let Some(pid) = pid_opt {
                 let _ = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(session.leader_pid as i32),
+                    nix::unistd::Pid::from_raw(pid as i32),
                     nix::sys::signal::Signal::SIGTERM,
                 );
             }
         }
         for sid in session_ids {
-            st.remove_session(&sid);
+            finalize_session_removal(&self.state, &sid).await;
         }
         Ok(())
     }
 
     /// Terminate a seat (close all sessions on it).
     async fn terminate_seat(&self, seat_id: &str) -> fdo::Result<()> {
-        let mut st = self.state.lock().await;
-        let seat = st.seats.get(seat_id).ok_or_else(|| {
-            fdo::Error::Failed(format!("no seat '{seat_id}'"))
-        })?;
-        let session_ids = seat.sessions.clone();
+        let session_ids = {
+            let st = self.state.lock().await;
+            let seat = st.seats.get(seat_id).ok_or_else(|| {
+                fdo::Error::Failed(format!("no seat '{seat_id}'"))
+            })?;
+            seat.sessions.clone()
+        };
         for sid in session_ids {
-            if let Some(session) = st.sessions.get(&sid) {
+            let pid_opt = self
+                .state
+                .lock()
+                .await
+                .sessions
+                .get(&sid)
+                .map(|s| s.leader_pid);
+            if let Some(pid) = pid_opt {
                 let _ = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(session.leader_pid as i32),
+                    nix::unistd::Pid::from_raw(pid as i32),
                     nix::sys::signal::Signal::SIGTERM,
                 );
             }
-            st.remove_session(&sid);
+            finalize_session_removal(&self.state, &sid).await;
         }
         Ok(())
     }
@@ -418,37 +469,37 @@ impl Manager {
     /// Initiate system power-off.
     async fn power_off(&self, interactive: bool) -> fdo::Result<()> {
         let _ = interactive;
-        do_shutdown(dynamod_common::protocol::ShutdownKind::Poweroff).await
+        self.run_shutdown(PowerShutdownKind::Poweroff).await
     }
 
     /// Initiate system reboot.
     async fn reboot(&self, interactive: bool) -> fdo::Result<()> {
         let _ = interactive;
-        do_shutdown(dynamod_common::protocol::ShutdownKind::Reboot).await
+        self.run_shutdown(PowerShutdownKind::Reboot).await
     }
 
     /// Initiate system halt.
     async fn halt(&self, interactive: bool) -> fdo::Result<()> {
         let _ = interactive;
-        do_shutdown(dynamod_common::protocol::ShutdownKind::Halt).await
+        self.run_shutdown(PowerShutdownKind::Halt).await
     }
 
     /// Suspend the system.
     async fn suspend(&self, interactive: bool) -> fdo::Result<()> {
         let _ = interactive;
-        do_power_state("mem").await
+        self.run_sleep(SleepKind::Suspend).await
     }
 
     /// Hibernate the system.
     async fn hibernate(&self, interactive: bool) -> fdo::Result<()> {
         let _ = interactive;
-        do_power_state("disk").await
+        self.run_sleep(SleepKind::Hibernate).await
     }
 
     /// Hybrid suspend+hibernate.
     async fn hybrid_sleep(&self, interactive: bool) -> fdo::Result<()> {
         let _ = interactive;
-        do_power_state("disk").await
+        self.run_sleep(SleepKind::HybridSleep).await
     }
 
     /// Check if power-off is possible.
@@ -603,12 +654,18 @@ impl Manager {
 
     #[zbus(property, name = "NAutoVTs")]
     async fn n_auto_vts(&self) -> u32 {
-        6
+        self.state.lock().await.config.read().await.n_auto_vts
     }
 
     #[zbus(property)]
     async fn kill_user_processes(&self) -> bool {
-        false
+        self.state
+            .lock()
+            .await
+            .config
+            .read()
+            .await
+            .kill_user_processes
     }
 
     #[zbus(property)]
@@ -634,12 +691,82 @@ impl Manager {
 
     #[zbus(property)]
     async fn inhibit_delay_max_u_sec(&self) -> u64 {
-        5_000_000 // 5 seconds
+        self.state
+            .lock()
+            .await
+            .config
+            .read()
+            .await
+            .inhibit_delay_max
+            .as_micros() as u64
     }
 
     #[zbus(property)]
     async fn user_stop_delay_u_sec(&self) -> u64 {
-        10_000_000 // 10 seconds
+        self.state
+            .lock()
+            .await
+            .config
+            .read()
+            .await
+            .user_stop_delay
+            .as_micros() as u64
+    }
+}
+
+impl Manager {
+    /// Construct a closure that emits PrepareForSleep on this Manager's
+    /// D-Bus object path.
+    fn prepare_for_sleep_emitter(&self) -> crate::acpi::PrepareEmitter {
+        let conn = self.connection.clone();
+        Arc::new(move |active: bool| -> zbus::Result<()> {
+            let conn = conn.clone();
+            tokio::spawn(async move {
+                let _ = conn
+                    .emit_signal(
+                        None::<&str>,
+                        "/org/freedesktop/login1",
+                        "org.freedesktop.login1.Manager",
+                        "PrepareForSleep",
+                        &(active,),
+                    )
+                    .await;
+            });
+            Ok(())
+        })
+    }
+
+    fn prepare_for_shutdown_emitter(&self) -> crate::acpi::PrepareEmitter {
+        let conn = self.connection.clone();
+        Arc::new(move |active: bool| -> zbus::Result<()> {
+            let conn = conn.clone();
+            tokio::spawn(async move {
+                let _ = conn
+                    .emit_signal(
+                        None::<&str>,
+                        "/org/freedesktop/login1",
+                        "org.freedesktop.login1.Manager",
+                        "PrepareForShutdown",
+                        &(active,),
+                    )
+                    .await;
+            });
+            Ok(())
+        })
+    }
+
+    async fn run_sleep(&self, kind: SleepKind) -> fdo::Result<()> {
+        let emit = self.prepare_for_sleep_emitter();
+        power::execute_sleep(Arc::clone(&self.state), move |on| emit(on), kind)
+            .await
+            .map_err(fdo::Error::Failed)
+    }
+
+    async fn run_shutdown(&self, kind: PowerShutdownKind) -> fdo::Result<()> {
+        let emit = self.prepare_for_shutdown_emitter();
+        power::execute_shutdown(Arc::clone(&self.state), move |on| emit(on), kind)
+            .await
+            .map_err(fdo::Error::Failed)
     }
 }
 
@@ -701,42 +828,147 @@ pub fn escape_object_path_component(s: &str) -> String {
     out
 }
 
-async fn do_shutdown(kind: dynamod_common::protocol::ShutdownKind) -> fdo::Result<()> {
-    tokio::task::spawn_blocking(move || svmgr_client::request_shutdown(kind))
-        .await
-        .map_err(|e| fdo::Error::Failed(e.to_string()))?
-        .map_err(|e| fdo::Error::Failed(e.to_string()))
+/// Resolve the caller's (uid, pid) via DBusProxy.GetConnectionCredentials.
+/// Returns (0, 0) if anything goes wrong — keeps backward compat with the old
+/// stub behavior and never breaks Inhibit().
+async fn caller_credentials(
+    conn: &zbus::Connection,
+    header: &zbus::message::Header<'_>,
+) -> (u32, u32) {
+    let Some(sender) = header.sender() else {
+        return (0, 0);
+    };
+    let proxy = match zbus::fdo::DBusProxy::new(conn).await {
+        Ok(p) => p,
+        Err(_) => return (0, 0),
+    };
+    let bus_name = zbus::names::BusName::Unique(sender.to_owned());
+    let creds = match proxy.get_connection_credentials(bus_name).await {
+        Ok(c) => c,
+        Err(_) => return (0, 0),
+    };
+    let uid = creds.unix_user_id().unwrap_or(0);
+    let pid = creds.process_id().unwrap_or(0);
+    (uid, pid)
 }
 
-async fn do_power_state(state: &str) -> fdo::Result<()> {
-    let state = state.to_string();
-    tokio::task::spawn_blocking(move || {
-        std::fs::write("/sys/power/state", &state)
-    })
-    .await
-    .map_err(|e| fdo::Error::Failed(e.to_string()))?
-    .map_err(|e| fdo::Error::Failed(e.to_string()))
-}
-
-fn get_caller_uid(_header: &zbus::message::Header<'_>) -> u32 {
-    // In a full implementation, we would use the D-Bus credentials
-    // to get the caller's UID. For now, return 0 (root).
-    0
-}
-
-fn get_caller_pid(_header: &zbus::message::Header<'_>) -> u32 {
-    0
-}
-
-fn get_username(uid: u32) -> Option<String> {
+/// Look up (username, gid) for a uid via /etc/passwd.
+fn get_user_info(uid: u32) -> Option<(String, u32)> {
     nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
         .ok()
         .flatten()
-        .map(|u| u.name)
+        .map(|u| (u.name, u.gid.as_raw()))
 }
 
+/// Information captured before activating a new session, used to drive the
+/// device-ACL handover after the state lock is released.
+#[derive(Debug, Default)]
+struct AclHandover {
+    seat: Option<SeatId>,
+    old_uid: Option<u32>,
+    new_uid: Option<u32>,
+}
+
+fn activate_with_acl_handover(st: &mut LoginState, session_id: &str) -> AclHandover {
+    let (seat_id, new_uid) = match st.sessions.get(session_id) {
+        Some(s) => (s.seat.clone(), s.uid),
+        None => return AclHandover::default(),
+    };
+    let old_uid = seat_id
+        .as_ref()
+        .and_then(|sid| st.seats.get(sid))
+        .and_then(|s| s.active_session.as_ref())
+        .filter(|id| *id != session_id)
+        .and_then(|id| st.sessions.get(id))
+        .map(|s| s.uid);
+
+    st.activate_session(session_id);
+
+    AclHandover {
+        seat: seat_id,
+        old_uid,
+        new_uid: Some(new_uid),
+    }
+}
+
+fn run_acl_handover(handover: AclHandover) {
+    let Some(seat) = handover.seat else { return };
+    if let Some(old) = handover.old_uid {
+        if handover.new_uid != Some(old) {
+            device::revert_session_acl(&seat);
+        }
+    }
+    if let Some(new) = handover.new_uid {
+        device::apply_session_acl(&seat, new);
+    }
+}
+
+/// Remove a session and trigger the runtime-dir/cgroup teardown chain.
+/// Schedules `/run/user/$UID` removal after `UserStopDelaySec` if this was
+/// the user's last session.
+async fn finalize_session_removal(
+    state: &Arc<Mutex<LoginState>>,
+    session_id: &str,
+) {
+    let mut st = state.lock().await;
+    let Some(session) = st.sessions.get(session_id) else {
+        return;
+    };
+    let uid = session.uid;
+    let was_active = session.active;
+    let seat = session.seat.clone();
+
+    st.remove_session(session_id);
+
+    // Best-effort cgroup scope cleanup. The svmgr's own cgroups are untouched.
+    cgroup::release_scope(uid, session_id);
+
+    let user_gone = !st.users.contains_key(&uid);
+    let user_stop_delay = st.config.read().await.user_stop_delay;
+
+    if user_gone {
+        let state_clone = Arc::clone(state);
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(user_stop_delay).await;
+            let still_gone = {
+                let st = state_clone.lock().await;
+                !st.users.contains_key(&uid)
+            };
+            if still_gone {
+                runtime_dir::release(uid);
+                cgroup::release_user_slice(uid);
+                state_clone.lock().await.pending_user_cleanups.remove(&uid);
+                tracing::info!("user {uid} runtime dir + cgroup slice released");
+            }
+        });
+        st.pending_user_cleanups.insert(uid, handle);
+    }
+
+    let new_active_uid = seat
+        .as_ref()
+        .and_then(|sid| st.seats.get(sid))
+        .and_then(|s| s.active_session.clone())
+        .and_then(|sid| st.sessions.get(&sid))
+        .map(|s| s.uid);
+
+    drop(st);
+
+    if was_active {
+        if let Some(s) = &seat {
+            if Some(uid) != new_active_uid {
+                device::revert_session_acl(s);
+            }
+            if let Some(new) = new_active_uid {
+                if new != uid {
+                    device::apply_session_acl(s, new);
+                }
+            }
+        }
+    }
+}
+
+
 // Re-export for use in other modules
-pub use escape_object_path_component as escape_path;
 
 // Convenience aliases
 pub fn session_path(id: &str) -> String { session_object_path(id) }

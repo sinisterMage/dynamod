@@ -5,8 +5,13 @@
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
+
+use crate::config::Config;
 use crate::inhibitor::Inhibitor;
 
 // ---------- identifiers ----------
@@ -150,6 +155,10 @@ pub struct LoginState {
     pub users: HashMap<u32, User>,
     pub pid_to_session: HashMap<u32, SessionId>,
     pub inhibitors: Vec<Inhibitor>,
+    pub config: Arc<RwLock<Config>>,
+    /// Pending `/run/user/$UID` cleanup tasks, cancelled when the user logs
+    /// back in before `UserStopDelaySec` elapses.
+    pub pending_user_cleanups: HashMap<u32, JoinHandle<()>>,
 }
 
 impl LoginState {
@@ -160,6 +169,20 @@ impl LoginState {
             users: HashMap::new(),
             pid_to_session: HashMap::new(),
             inhibitors: Vec::new(),
+            config: Arc::new(RwLock::new(Config::default())),
+            pending_user_cleanups: HashMap::new(),
+        }
+    }
+
+    pub fn with_config(config: Arc<RwLock<Config>>) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            seats: HashMap::new(),
+            users: HashMap::new(),
+            pid_to_session: HashMap::new(),
+            inhibitors: Vec::new(),
+            config,
+            pending_user_cleanups: HashMap::new(),
         }
     }
 

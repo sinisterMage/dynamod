@@ -2,7 +2,15 @@
 ///
 /// Opens device nodes and passes fds to session controllers (Wayland compositors).
 /// Manages DRM master status during session switches.
+///
+/// Also handles "uaccess"-style ACL handover: when a session becomes active on
+/// a seat, the DRM and input devices on that seat are chowned to the session
+/// user (and reverted on deactivation). This replaces the udev `uaccess` tag
+/// + ACL rules that systemd-using systems rely on; without it, an unprivileged
+/// compositor that doesn't go through TakeDevice (some KDE auxiliary tools)
+/// can't open `/dev/dri/card0`.
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::path::{Path, PathBuf};
 
 /// DRM ioctl numbers (from linux/drm.h, public kernel UAPI).
 const DRM_IOCTL_BASE: libc::Ioctl = b'd' as libc::Ioctl;
@@ -121,4 +129,75 @@ fn resolve_devname(major: u32, minor: u32) -> Option<String> {
         }
     }
     None
+}
+
+// ---- ACL handover (uaccess equivalent) ----
+
+/// Devices that get chowned to the active session's user.
+/// We don't yet support per-seat tagging; everything is on seat0.
+fn enumerate_session_devices(_seat_id: &str) -> Vec<(PathBuf, u32)> {
+    let mut out = Vec::new();
+
+    // DRM card / render nodes. Mode 0660; chgrp left alone, only chown.
+    if let Ok(entries) = std::fs::read_dir("/dev/dri") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("card") || name.starts_with("renderD") {
+                out.push((entry.path(), 0o660));
+            }
+        }
+    }
+
+    // Input devices (evdev, keyboards, mice).
+    if let Ok(entries) = std::fs::read_dir("/dev/input") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("event") || name.starts_with("mouse") || name == "mice" {
+                out.push((entry.path(), 0o660));
+            }
+        }
+    }
+
+    // Sound devices.
+    if let Ok(entries) = std::fs::read_dir("/dev/snd") {
+        for entry in entries.flatten() {
+            out.push((entry.path(), 0o660));
+        }
+    }
+
+    out
+}
+
+/// Chown the seat's devices to `uid` and ensure mode bits allow group access.
+pub fn apply_session_acl(seat_id: &str, uid: u32) {
+    for (path, mode) in enumerate_session_devices(seat_id) {
+        if let Err(e) = chown_and_chmod(&path, Some(uid), None, mode) {
+            tracing::debug!("ACL: {} chown({uid}) failed: {e}", path.display());
+        }
+    }
+    tracing::info!("ACL: handed over seat={seat_id} devices to uid={uid}");
+}
+
+/// Revert ACLs back to root ownership.
+pub fn revert_session_acl(seat_id: &str) {
+    for (path, mode) in enumerate_session_devices(seat_id) {
+        if let Err(e) = chown_and_chmod(&path, Some(0), None, mode) {
+            tracing::debug!("ACL: {} revert chown(0) failed: {e}", path.display());
+        }
+    }
+    tracing::debug!("ACL: reverted seat={seat_id} devices to root");
+}
+
+fn chown_and_chmod(
+    path: &Path,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    mode: u32,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::{chown, PermissionsExt};
+    chown(path, uid, gid)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    Ok(())
 }

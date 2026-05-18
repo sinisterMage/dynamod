@@ -1,0 +1,20 @@
+[package]
+name = "pam_dynamod_logind"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[lib]
+name = "pam_dynamod_logind"
+crate-type = ["cdylib"]
+
+# Excluded from the workspace (see ../Cargo.toml `exclude`). Build:
+#   cargo build --release -p pam_dynamod_logind --target x86_64-unknown-linux-gnu
+[dependencies]
+libc = "0.2"
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+
+[profile.release]
+opt-level = 2
+lto = true
+strip = "symbols"

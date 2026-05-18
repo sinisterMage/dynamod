@@ -1,0 +1,20 @@
+# PAM snippet for dynamod-logind session integration.
+#
+# Copy this line into the relevant /etc/pam.d/<service> files (login,
+# sddm, plasmalogin, gdm-password, sshd, su-l, ...) for those services to
+# register login sessions with dynamod-logind.
+#
+# Without this, no login1 sessions are ever created, so libsystemd's
+# sd_pid_get_session() returns ENOENT — which breaks KWin's DRM master
+# acquisition path on KDE Plasma, and breaks anything else that asks
+# "what login session am I in?".
+#
+# Module options:
+#   class=<user|greeter|background>   default: user
+#   type=<tty|x11|wayland|unspecified> default: inferred from PAM_TTY / PAM_XDISPLAY
+#   desktop=<KDE|GNOME|...>           default: empty
+#
+# Place AFTER any pam_systemd.so line (so we are a no-op if upstream
+# systemd is also installed) and BEFORE pam_env.so (so XDG_* env reaches it).
+
+session   optional   pam_dynamod_logind.so

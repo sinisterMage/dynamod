@@ -17,6 +17,7 @@ optdepends=(
 )
 backup=(
     'etc/dynamod/supervisors/root.toml'
+    'etc/dynamod/logind.conf'
 )
 
 # For local builds, point this to the repo root
@@ -27,6 +28,11 @@ build() {
     cd "$_srcdir"
     cd zig && zig build
     cd ../rust && cargo build --release
+    # PAM module: glibc target, not musl (cdylib doesn't link statically).
+    cargo build --release \
+        -p pam_dynamod_logind \
+        --manifest-path pam_dynamod_logind/Cargo.toml \
+        --target x86_64-unknown-linux-gnu
 }
 
 check() {
@@ -70,6 +76,17 @@ package() {
     for f in config/dbus-1/*.conf; do
         install -Dm644 "$f" "$pkgdir/usr/share/dbus-1/system.d/$(basename "$f")"
     done
+
+    # logind.conf — default ships with everything commented out (= defaults)
+    install -Dm644 config/logind.conf "$pkgdir/etc/dynamod/logind.conf"
+
+    # PAM module (.so) and the documented snippet.
+    local _pam_so="rust/pam_dynamod_logind/target/x86_64-unknown-linux-gnu/release/libpam_dynamod_logind.so"
+    if [ -f "$_pam_so" ]; then
+        install -Dm755 "$_pam_so" "$pkgdir/usr/lib/security/pam_dynamod_logind.so"
+    fi
+    install -Dm644 config/pam.d/dynamod-logind-snippet \
+        "$pkgdir/usr/share/dynamod/pam.d/dynamod-logind-snippet"
 
     # Documentation
     install -Dm644 README.md      "$pkgdir/usr/share/doc/$pkgname/README.md"
