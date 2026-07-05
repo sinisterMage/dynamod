@@ -4,6 +4,7 @@ const linux = std.os.linux;
 const constants = @import("constants.zig");
 const kmsg = @import("kmsg.zig");
 const cmdline = @import("cmdline.zig");
+const iso9660 = @import("iso9660.zig");
 const rootdev = @import("rootdev.zig");
 const switchroot = @import("switchroot.zig");
 
@@ -84,14 +85,14 @@ fn mkdir_path(path: [*:0]const u8) void {
     _ = linux.mkdirat(@bitCast(@as(i32, linux.AT.FDCWD)), path, 0o755);
 }
 
-/// `inner_abs` must start with `/` (path on the ISO). Result: `iso_base` + inner without duplicate slash.
+/// `inner_abs` must start with `/` (path on the ISO). Result: `iso_base` ++ `inner_abs`
+/// (`iso_base` has no trailing slash, so the inner path keeps its leading one).
 fn joinIsoPath(out: *[512:0]u8, iso_base: []const u8, inner_abs: []const u8) error{ BadPath, TooLong }!void {
     if (inner_abs.len < 2 or inner_abs[0] != '/') return error.BadPath;
-    const rest = inner_abs[1..];
-    if (iso_base.len + rest.len + 1 > out.len) return error.TooLong;
+    if (iso_base.len + inner_abs.len + 1 > out.len) return error.TooLong;
     @memcpy(out[0..iso_base.len], iso_base);
-    @memcpy(out[iso_base.len..][0..rest.len], rest);
-    out[iso_base.len + rest.len] = 0;
+    @memcpy(out[iso_base.len..][0..inner_abs.len], inner_abs);
+    out[iso_base.len + inner_abs.len] = 0;
 }
 
 /// Copy squashfs image from mounted ISO (or any fs) to tmpfs, then loop-mount the copy.
@@ -164,12 +165,12 @@ fn copyLiveSquashToTmpfs(src: [*:0]const u8, dst: [*:0]const u8, klog_arg: ?kmsg
     if (klog_arg) |k| k.info("dynamod live: squashfs copied to tmpfs ({d} bytes)", .{copied});
 }
 
-/// Copy squash extent from the raw block device (ISO) using pread. Avoids VFS open/read on iso9660,
+/// Copy squash extents from the raw block device (ISO) using pread. Avoids VFS open/read on iso9660,
 /// which can block indefinitely on QEMU + ATAPI when opening the squash file on the mounted ISO.
+/// Extents come from the in-init iso9660 parser (multi-extent files are >4GiB-1 pieces).
 fn copySquashFromBlockDev(
     dev_z: [*:0]const u8,
-    start_byte: u64,
-    expected_size: u64,
+    extents: []const iso9660.Extent,
     dst: [*:0]const u8,
     klog_arg: ?kmsg,
 ) void {
@@ -195,43 +196,51 @@ fn copySquashFromBlockDev(
     var copied: u64 = 0;
     const log_every: u64 = 32 * 1024 * 1024;
     var next_log_at: u64 = log_every;
-    while (copied < expected_size) {
-        const remain = expected_size - copied;
-        const chunk: usize = @min(buf.len, @as(usize, @intCast(remain)));
-        const rd = std.posix.pread(in_fd, buf[0..chunk], start_byte + copied) catch {
-            if (klog_arg) |k| k.emerg("dynamod live: pread squash extent failed", .{});
-            halt();
-        };
-        if (rd == 0) {
-            if (klog_arg) |k| k.emerg("dynamod live: short pread copying squashfs", .{});
-            halt();
-        }
+    for (extents) |ext| {
+        var done: u64 = 0;
+        while (done < ext.size) {
+            const remain = ext.size - done;
+            const chunk: usize = @min(buf.len, @as(usize, @intCast(remain)));
+            const rd = std.posix.pread(in_fd, buf[0..chunk], ext.start_byte + done) catch {
+                if (klog_arg) |k| k.emerg("dynamod live: pread squash extent failed", .{});
+                halt();
+            };
+            if (rd == 0) {
+                if (klog_arg) |k| k.emerg("dynamod live: short pread copying squashfs", .{});
+                halt();
+            }
 
-        var woff: usize = 0;
-        while (woff < rd) {
-            const wr_u = linux.write(out_fd, @as([*]const u8, @ptrCast(&buf[woff])), rd - woff);
-            const wr_s: isize = @bitCast(wr_u);
-            if (wr_s < 0) {
-                if (klog_arg) |k| k.emerg("dynamod live: write tmpfs squash copy failed", .{});
-                halt();
+            var woff: usize = 0;
+            while (woff < rd) {
+                const wr_u = linux.write(out_fd, @as([*]const u8, @ptrCast(&buf[woff])), rd - woff);
+                const wr_s: isize = @bitCast(wr_u);
+                if (wr_s < 0) {
+                    if (klog_arg) |k| k.emerg("dynamod live: write tmpfs squash copy failed", .{});
+                    halt();
+                }
+                if (wr_s == 0) {
+                    if (klog_arg) |k| k.emerg("dynamod live: short write copying squashfs (pread path)", .{});
+                    halt();
+                }
+                woff += @as(usize, @intCast(wr_s));
             }
-            if (wr_s == 0) {
-                if (klog_arg) |k| k.emerg("dynamod live: short write copying squashfs (pread path)", .{});
-                halt();
-            }
-            woff += @as(usize, @intCast(wr_s));
-        }
-        copied += rd;
-        if (klog_arg) |k| {
-            if (copied >= next_log_at) {
-                k.info("dynamod live: squash copy progress {d} MiB (pread)", .{
-                    @divTrunc(@as(i64, @intCast(copied)) + (1 << 20) - 1, 1 << 20),
-                });
-                next_log_at = copied + log_every;
+            done += rd;
+            copied += rd;
+            if (klog_arg) |k| {
+                if (copied >= next_log_at) {
+                    k.info("dynamod live: squash copy progress {d} MiB (pread)", .{
+                        @divTrunc(@as(i64, @intCast(copied)) + (1 << 20) - 1, 1 << 20),
+                    });
+                    next_log_at = copied + log_every;
+                }
             }
         }
     }
 
+    if (copied == 0) {
+        if (klog_arg) |k| k.emerg("dynamod live: squashfs on media empty or missing", .{});
+        halt();
+    }
     if (klog_arg) |k| k.info("dynamod live: squashfs copied to tmpfs ({d} bytes, pread)", .{copied});
 }
 
@@ -249,13 +258,13 @@ fn mountIso(dev_path: []const u8, klog_arg: ?kmsg) void {
     @memcpy(target_z[0..iso_mp.len], iso_mp);
     target_z[iso_mp.len] = 0;
 
-    const iso9660: [*:0]const u8 = "iso9660";
-    const udf: [*:0]const u8 = "udf";
+    const fstype_iso9660: [*:0]const u8 = "iso9660";
+    const fstype_udf: [*:0]const u8 = "udf";
 
     const r1 = linux.mount(
         @ptrCast(&dev_z),
         @ptrCast(&target_z),
-        iso9660,
+        fstype_iso9660,
         constants.MS_RDONLY,
         0,
     );
@@ -269,7 +278,7 @@ fn mountIso(dev_path: []const u8, klog_arg: ?kmsg) void {
     const r2 = linux.mount(
         @ptrCast(&dev_z),
         @ptrCast(&target_z),
-        udf,
+        fstype_udf,
         constants.MS_RDONLY,
         0,
     );
@@ -420,28 +429,38 @@ pub fn doLiveSwitchRoot(cl: *const cmdline.Cmdline, klog_arg: ?kmsg) noreturn {
 
     loadLiveFsModules(klog_arg);
 
-    mountIso(resolved.path(), klog_arg);
-    if (klog_arg) |k| k.infoLiteral("live: returned from mountIso");
-
     const inner = cl.getLiveSquashfsPath();
-    var squash_path_buf: [512:0]u8 = undefined;
-    joinIsoPath(&squash_path_buf, constants.live_iso_mp, inner) catch {
-        if (klog_arg) |k| k.emerg("dynamod.squashfs must be absolute (e.g. /live/root.squashfs)", .{});
-        halt();
-    };
-    if (klog_arg) |k| k.infoLiteral("live: squash path joined");
 
-    var squash_src_z: [*:0]const u8 = @ptrCast(&squash_path_buf);
-    if (cl.getLiveSquashPread()) |sp| {
-        if (klog_arg) |k| k.info("dynamod live: copying squashfs via block pread (offset {d} len {d})", .{ sp.start_byte, sp.size });
-        copySquashFromBlockDev(resolved.pathZ(), sp.start_byte, sp.size, constants.live_squash_tmp_path, klog_arg);
-        squash_src_z = constants.live_squash_tmp_path;
-    } else if (cl.liveSkipTmpfsSquashCopy()) {
-        if (klog_arg) |k| k.warn("dynamod live: tmpfs squash copy skipped (loop on ISO; use default cmdline if you see hangs)", .{});
+    // Default: locate the squashfs by parsing ISO 9660 straight off the raw device,
+    // then pread its extents into tmpfs — the ISO is never mounted and no VFS file
+    // I/O touches it (iso9660 open/stat can block forever on QEMU ATAPI CD-ROM).
+    var parsed: ?iso9660.FileExtents = null;
+    if (!cl.liveSkipTmpfsSquashCopy() and cl.liveIsoParse()) {
+        parsed = iso9660.locateFile(resolved.pathZ(), inner, klog_arg);
+    }
+
+    var squash_path_buf: [512:0]u8 = undefined;
+    var squash_src_z: [*:0]const u8 = constants.live_squash_tmp_path;
+    if (parsed) |fx| {
+        if (klog_arg) |k| k.info("dynamod live: iso9660 parsed {s}: {d} extent(s), {d} bytes", .{ inner, fx.count, fx.total_size });
+        copySquashFromBlockDev(resolved.pathZ(), fx.slice(), constants.live_squash_tmp_path, klog_arg);
     } else {
-        if (klog_arg) |k| k.info("dynamod live: copying squashfs to tmpfs before loop mount", .{});
-        copyLiveSquashToTmpfs(squash_src_z, constants.live_squash_tmp_path, klog_arg);
-        squash_src_z = constants.live_squash_tmp_path;
+        // Mount path: direct-loop opt-out, iso_parse=0, or parse failure (e.g. UDF-only media).
+        mountIso(resolved.path(), klog_arg);
+        if (klog_arg) |k| k.infoLiteral("live: returned from mountIso");
+
+        joinIsoPath(&squash_path_buf, constants.live_iso_mp, inner) catch {
+            if (klog_arg) |k| k.emerg("dynamod.squashfs must be absolute (e.g. /live/root.squashfs)", .{});
+            halt();
+        };
+
+        if (cl.liveSkipTmpfsSquashCopy()) {
+            if (klog_arg) |k| k.warn("dynamod live: tmpfs squash copy skipped (loop on ISO; use default cmdline if you see hangs)", .{});
+            squash_src_z = @ptrCast(&squash_path_buf);
+        } else {
+            if (klog_arg) |k| k.warn("dynamod live: iso9660 parse unavailable — copying squashfs from mounted ISO", .{});
+            copyLiveSquashToTmpfs(@ptrCast(&squash_path_buf), constants.live_squash_tmp_path, klog_arg);
+        }
     }
 
     attachLoopAndMountSquash(squash_src_z, klog_arg);

@@ -284,6 +284,10 @@ fn resolveLabelValue(value: []const u8, rootwait: bool, klog_arg: ?kmsg) ?Resolv
             if (klog_arg) |k| k.info("resolved LABEL={s} via blkid -> {s}", .{ value, r.path() });
             return r;
         }
+        if (tryBlkidScanLabelDevice(value, klog_arg)) |r| {
+            if (klog_arg) |k| k.info("resolved LABEL={s} via blkid scan -> {s}", .{ value, r.path() });
+            return r;
+        }
     }
 
     if (rootwait) {
@@ -337,6 +341,71 @@ fn parseBlkidDeviceLine(raw: []const u8) ?[]const u8 {
     const dev = std.mem.trim(u8, dev_part, " \t");
     if (dev.len < 6 or !std.mem.startsWith(u8, dev, "/dev/")) return null;
     return dev;
+}
+
+/// Like tryBlkidUuidDevice: run `blkid` with no flags (busybox blkid has no -L)
+/// and scan the output for LABEL="<value>" (case-insensitive — ISO labels are
+/// conventionally upper case).
+fn tryBlkidScanLabelDevice(label: []const u8, _: ?kmsg) ?ResolvedDevice {
+    _ = std.fs.openFileAbsolute(std.mem.span(blkid_path), .{}) catch return null;
+
+    const pid_rc = linux.fork();
+    const pid_e = linux.E.init(pid_rc);
+    if (pid_e != .SUCCESS) return null;
+
+    if (pid_rc == 0) {
+        const out: [*:0]const u8 = "/run/dynamod-blkid-out";
+        const out_fd = linux.open(out, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
+        if (linux.E.init(out_fd) != .SUCCESS) linux.exit(127);
+        _ = linux.dup2(@intCast(out_fd), 1);
+        _ = linux.close(@intCast(out_fd));
+        const null_fd = linux.open("/dev/null", .{ .ACCMODE = .WRONLY }, 0);
+        if (linux.E.init(null_fd) == .SUCCESS) {
+            _ = linux.dup2(@intCast(null_fd), 2);
+            _ = linux.close(@intCast(null_fd));
+        }
+        const argv = [_:null]?[*:0]const u8{blkid_path};
+        const envp = [_:null]?[*:0]const u8{};
+        _ = linux.execve(blkid_path, &argv, &envp);
+        linux.exit(127);
+    }
+
+    var status: u32 = 0;
+    _ = linux.wait4(@intCast(pid_rc), &status, 0, null);
+
+    const file = std.fs.openFileAbsolute(blkid_out_path, .{}) catch return null;
+    defer file.close();
+    var read_buf: [4096]u8 = undefined;
+    const n = file.readAll(&read_buf) catch return null;
+    if (n == 0) return null;
+
+    var needle_buf: [300]u8 = undefined;
+    const needle = std.fmt.bufPrint(&needle_buf, "LABEL=\"{s}\"", .{label}) catch return null;
+
+    var pos: usize = 0;
+    while (pos < n) {
+        var end = pos;
+        while (end < n and read_buf[end] != '\n') : (end += 1) {}
+        const line = read_buf[pos..end];
+
+        if (std.ascii.indexOfIgnoreCase(line, needle) != null) {
+            if (std.mem.indexOfScalar(u8, line, ':')) |colon| {
+                const dp = std.mem.trim(u8, line[0..colon], " \t");
+                if (dp.len >= 5 and std.mem.startsWith(u8, dp, "/dev/") and deviceExists(dp)) {
+                    var result = ResolvedDevice{};
+                    if (dp.len > result.path_buf.len - 1) return null;
+                    @memcpy(result.path_buf[0..dp.len], dp);
+                    result.path_buf[dp.len] = 0;
+                    result.path_len = dp.len;
+                    return result;
+                }
+            }
+        }
+
+        pos = if (end < n) end + 1 else n;
+    }
+
+    return null;
 }
 
 fn tryBlkidLabelDevice(label: []const u8, _: ?kmsg) ?ResolvedDevice {
@@ -406,11 +475,11 @@ fn waitForDevice(result: ResolvedDevice, klog_arg: ?kmsg) ?ResolvedDevice {
     return null;
 }
 
-/// Check if a device path exists by attempting to stat it.
+/// Check if a device path exists by attempting to open it.
+/// Non-absolute paths (malformed root=) are treated as missing —
+/// openFileAbsolute would assert (and crash PID 1) on them.
 fn deviceExists(path: []const u8) bool {
-    _ = std.fs.openFileAbsolute(path, .{}) catch return false;
-    // File exists (we opened it successfully). Close implicitly via defer-less pattern.
-    // Actually, we need to close it. Use a different approach:
+    if (!std.fs.path.isAbsolute(path)) return false;
     const file = std.fs.openFileAbsolute(path, .{}) catch return false;
     file.close();
     return true;

@@ -155,15 +155,16 @@ Verified working with **sway** (Wayland compositor via seatd) and
 
 | Parameter | Meaning |
 |-----------|---------|
-| `dynamod.media=` | Block device with the ISO (same forms as `root=`: `/dev/sr0`, `LABEL=…`, `UUID=…`) |
+| `dynamod.media=` | Block device with the ISO (same forms as `root=`: `/dev/sr0`, `LABEL=…`, `UUID=…`). Point it at the **whole device**, not a partition — the ISO 9660 parser reads absolute offsets |
 | `dynamod.squashfs=` | Path to the squashfs file inside the ISO (default `/live/root.squashfs`) |
 | `dynamod.overlay=` | If `0`/`false`/`no`, bind-mount squashfs on `/newroot` (read-only). Otherwise (default) use overlayfs with upper/work on tmpfs under `/run/dynamod/live/` |
+| `dynamod.live.iso_parse=` | If `0`/`false`/`no`, skip the in-init ISO 9660 parser and use the legacy iso9660/udf mount path |
 
-Steps: resolve `dynamod.media` (honours `rootwait` / `rootdelay`); best-effort `modprobe` for `loop`, `squashfs`, `iso9660`, `udf`, `overlay` when `/bin/modprobe` exists in the initramfs; mount the device as **iso9660** or **udf**; attach a **loop** device to the squashfs image and mount **squashfs**; optionally stack **overlayfs** on `/newroot`; then the same move/delete/re-exec sequence as the disk path.
+Steps: resolve `dynamod.media` (honours `rootwait` / `rootdelay`); best-effort `modprobe` for `loop`, `squashfs`, `iso9660`, `udf`, `overlay` when `/bin/modprobe` exists in the initramfs; **parse ISO 9660 directly from the raw device** (`zig/src/iso9660.zig` — Joliet first, then Rock Ridge `NM`, then plain identifiers) to find the squashfs extents and `pread` them into tmpfs — the ISO is never mounted and no VFS file I/O touches it (iso9660 `open`/`stat` can block indefinitely on QEMU ATAPI CD-ROM, and loop devices backed by files on iso9660 hang on some kernels, e.g. Debian #1106070); attach a **loop** device to the tmpfs copy and mount **squashfs**; optionally stack **overlayfs** on `/newroot`; then the same move/delete/re-exec sequence as the disk path. If parsing fails (pure-UDF media, unexpected structures) or `dynamod.live.iso_parse=0` is set, init falls back to mounting the device as **iso9660** or **udf** and streaming the squashfs into tmpfs from the mounted ISO.
 
 A **single** `root=` mount with `rootfstype=squashfs` is still supported when the squashfs lives on a **block** device (no file-on-ISO indirection).
 
-Packaging helper: `tools/mkiso.sh` builds `dynamod-live.iso` with volume id **DYNAISO** and `live/root.squashfs` from an existing `tools/mkimage.sh` disk image; use `dynamod.media=LABEL=DYNAISO` in the kernel cmdline. Minimal initramfs BusyBox **mdev** does not create `/dev/disk/by-label/`; init falls back to **`blkid -L`** (the initramfs includes a `blkid` → busybox symlink). If your BusyBox build omits `blkid`, use `dynamod.media=/dev/sr0` or add util-linux `blkid` to the initramfs.
+Packaging helper: `tools/mkiso.sh` builds `dynamod-live.iso` with volume id **DYNAISO** and `live/root.squashfs` from an existing `tools/mkimage.sh` disk image; use `dynamod.media=LABEL=DYNAISO` in the kernel cmdline. Minimal initramfs BusyBox **mdev** does not create `/dev/disk/by-label/`; init falls back to `blkid -L`, then to scanning flagless `blkid` output (BusyBox `blkid` has no `-L`). If your BusyBox build omits `blkid`, use `dynamod.media=/dev/sr0` or add util-linux `blkid` to the initramfs.
 
 **Early-boot services on live systems:** With overlay (default), `/` is writable and `remount-root-rw` behaves like a normal disk root. With `dynamod.overlay=0`, root stays read-only — adjust or drop `remount-root-rw` / machine-id generation for that profile if needed.
 

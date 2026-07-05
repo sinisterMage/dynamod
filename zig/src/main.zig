@@ -30,6 +30,15 @@ const cmdline_mod = @import("cmdline.zig");
 const switchroot = @import("switchroot.zig");
 const live = @import("live.zig");
 
+test {
+    // Test builds never analyze main(), so imported files must be referenced
+    // here for `zig build test` to collect their test declarations.
+    _ = @import("cmdline.zig");
+    _ = @import("iso9660.zig");
+    _ = @import("msgpack.zig");
+    _ = @import("rootdev.zig");
+}
+
 pub fn main() noreturn {
     // Helper mode: create /etc/machine-id after root is remounted rw (see machine-id.toml).
     var arg_it = std.process.args();

@@ -7,11 +7,6 @@ const std = @import("std");
 const constants = @import("constants.zig");
 const kmsg = @import("kmsg.zig");
 
-pub const LiveSquashPread = struct {
-    start_byte: u64,
-    size: u64,
-};
-
 pub const Cmdline = struct {
     buf: [4096]u8 = undefined,
     len: usize = 0,
@@ -118,19 +113,13 @@ pub const Cmdline = struct {
         return self.getParam("dynamod.squashfs") orelse "/live/root.squashfs";
     }
 
-    /// ISO 9660 logical block (2048-byte sectors) and exact file size for `/live/root.squashfs`,
-    /// from `dynamod.squash_pread=LBA:BYTES` (build-iso patches this into the image).
-    /// When set, init copies squash via `pread` on the block device instead of opening the file on iso9660.
-    pub fn getLiveSquashPread(self: *const Cmdline) ?LiveSquashPread {
-        const v = self.getParam("dynamod.squash_pread") orelse return null;
-        const colon = std.mem.indexOfScalar(u8, v, ':') orelse return null;
-        if (colon == 0 or colon + 1 >= v.len) return null;
-        const lba = std.fmt.parseInt(u64, v[0..colon], 10) catch return null;
-        const size = std.fmt.parseInt(u64, v[colon + 1 ..], 10) catch return null;
-        if (size == 0) return null;
-        const sector: u64 = 2048;
-        const start_byte = std.math.mul(u64, lba, sector) catch return null;
-        return LiveSquashPread{ .start_byte = start_byte, .size = size };
+    /// Locate the squashfs by parsing ISO 9660 directly from the raw media (default).
+    /// `dynamod.live.iso_parse=0` forces the legacy iso9660/udf mount path instead.
+    pub fn liveIsoParse(self: *const Cmdline) bool {
+        const v = self.getParam("dynamod.live.iso_parse") orelse return true;
+        if (std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false") or std.mem.eql(u8, v, "no"))
+            return false;
+        return true;
     }
 
     /// Use overlayfs (tmpfs upper/work) on top of squashfs; default true when live is on.
@@ -276,13 +265,20 @@ test "dynamod live direct_squash skips tmpfs copy" {
     try std.testing.expect(cl.liveSkipTmpfsSquashCopy());
 }
 
-test "dynamod squash_pread parses LBA and size" {
+test "dynamod live iso_parse defaults on" {
     var cl = Cmdline{};
-    const input = "dynamod.live=1 dynamod.squash_pread=18720:17698816";
+    const input = "dynamod.live=1 dynamod.media=/dev/sr0";
     @memcpy(cl.buf[0..input.len], input);
     cl.len = input.len;
 
-    const sp = cl.getLiveSquashPread().?;
-    try std.testing.expectEqual(@as(u64, 18720 * 2048), sp.start_byte);
-    try std.testing.expectEqual(@as(u64, 17698816), sp.size);
+    try std.testing.expect(cl.liveIsoParse());
+}
+
+test "dynamod live iso_parse=0 forces mount path" {
+    var cl = Cmdline{};
+    const input = "dynamod.live=1 dynamod.live.iso_parse=0";
+    @memcpy(cl.buf[0..input.len], input);
+    cl.len = input.len;
+
+    try std.testing.expect(!cl.liveIsoParse());
 }
